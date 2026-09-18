@@ -2,9 +2,10 @@ import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from backend.engine.strategy_interpreter.parser import StrategyParser
+from backend.engine.strategy_analysis.analysis_service import StrategyAnalysisService
 
 app = FastAPI(title="NEXA FUNDS AI")
 
@@ -65,34 +66,18 @@ def analyze_strategy(request: StrategyRequest):
         )
 
     try:
-        parser = StrategyParser()
-
-        strategy = parser.parse(
-            prompt
-        )
-
-        return {
-            "success": True,
-            "strategy": {
-                "name": strategy.name,
-                "symbol": strategy.symbol,
-                "timeframe": strategy.timeframe,
-                "direction": strategy.direction,
-                "entry_conditions": [
-                    {
-                        "indicator": condition.indicator,
-                        "operator": condition.operator,
-                        "value": condition.value,
-                        "period": condition.period,
-                        "timeframe": condition.timeframe,
-                    }
-                    for condition in strategy.entry_conditions
-                ],
-            },
-        }
-
+        service = StrategyAnalysisService()
+        result = service.analyze(prompt)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error") or "Strategy analysis failed.")
+        return result
+    except HTTPException:
+        raise
     except Exception as error:
         raise HTTPException(
-            status_code=400,
+            status_code=500,
             detail=str(error),
         )
+
+
+TestClient = TestClient

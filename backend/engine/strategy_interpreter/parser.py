@@ -27,30 +27,31 @@ class StrategyParser:
                 "Strategy text cannot be empty."
             )
 
-        timeframe = timeframe.upper()
+        detected_symbol = self._extract_symbol(text, symbol)
+        detected_timeframe = self._extract_timeframe(text, timeframe)
 
-        if timeframe not in SUPPORTED_TIMEFRAMES:
+        detected_timeframe = detected_timeframe.upper()
+        if detected_timeframe not in SUPPORTED_TIMEFRAMES:
             raise ValueError(
-                f"Unsupported timeframe '{timeframe}'. "
+                f"Unsupported timeframe '{detected_timeframe}'. "
                 f"Supported: {sorted(SUPPORTED_TIMEFRAMES)}"
             )
 
         conditions = []
 
-        # ====================================================
-        # MOVING AVERAGES
-        # ====================================================
-
         conditions.extend(
             self._parse_moving_averages(
                 text,
-                timeframe,
+                detected_timeframe,
             )
         )
 
-        # ====================================================
-        # NUMERIC INDICATORS
-        # ====================================================
+        conditions.extend(
+            self._parse_ema_crossover_alias(
+                text,
+                detected_timeframe,
+            )
+        )
 
         for indicator in [
             "RSI",
@@ -72,19 +73,15 @@ class StrategyParser:
                 self._parse_numeric_indicator(
                     text,
                     indicator,
-                    timeframe,
+                    detected_timeframe,
                 )
             )
-
-        # ====================================================
-        # DIRECTION
-        # ====================================================
 
         direction = "both"
 
         has_buy = bool(
             re.search(
-                r"\b(buy|long|bullish)\b",
+                r"\b(buy|long|bullish|uptrend)\b",
                 text,
                 re.I,
             )
@@ -92,7 +89,7 @@ class StrategyParser:
 
         has_sell = bool(
             re.search(
-                r"\b(sell|short|bearish)\b",
+                r"\b(sell|short|bearish|downtrend)\b",
                 text,
                 re.I,
             )
@@ -106,11 +103,90 @@ class StrategyParser:
 
         return StrategyDefinition(
             name="NEXA FUNDS AI Parsed Strategy",
-            symbol=symbol,
-            timeframe=timeframe,
+            symbol=detected_symbol,
+            timeframe=detected_timeframe,
             direction=direction,
             entry_conditions=conditions,
         )
+
+    def _extract_symbol(self, text: str, default: str) -> str:
+        symbols = (
+            "XAUUSD",
+            "EURUSD",
+            "GBPUSD",
+            "USDJPY",
+            "AUDUSD",
+            "NZDUSD",
+            "USDCAD",
+            "USDCHF",
+            "EURJPY",
+            "GBPJPY",
+            "AUDJPY",
+            "NAS100",
+            "US30",
+            "BTCUSD",
+            "ETHUSD",
+        )
+        for symbol in symbols:
+            if re.search(rf"\b{re.escape(symbol)}\b", text, re.I):
+                return symbol
+        return default.upper()
+
+    def _extract_timeframe(self, text: str, default: str) -> str:
+        normalized = text.upper()
+        for code in ["H4", "H1", "M30", "M15", "M5", "M1"]:
+            if re.search(rf"\b{code}\b", normalized):
+                return code
+        match = re.search(r"\b(\d{1,2})\s*(M|H)\b", text, re.I)
+        if match:
+            value = int(match.group(1))
+            unit = match.group(2).upper()
+            mapped = f"{unit}{value}"
+            if mapped in SUPPORTED_TIMEFRAMES:
+                return mapped
+        if re.search(r"\b15m\b|\b1h\b|\b5m\b|\b30m\b|\b4h\b", text, re.I):
+            lower = text.lower()
+            if "15m" in lower or "m15" in lower:
+                return "M15"
+            if "30m" in lower or "m30" in lower:
+                return "M30"
+            if "5m" in lower or "m5" in lower:
+                return "M5"
+            if "1h" in lower or "h1" in lower:
+                return "H1"
+            if "4h" in lower or "h4" in lower:
+                return "H4"
+        return default.upper()
+
+    def _parse_ema_crossover_alias(self, text, default_timeframe):
+        conditions = []
+        patterns = [
+            r"(?:(?P<timeframe>H4|H1|M30|M15|M5|M1)\s+)?(?:EMA|EMA\s*)\s*(?P<fast>\d+)\s*(?:/|to|and)?\s*(?:EMA\s*)?(?P<slow>\d+)\s*(?:crossover|cross(?:es)?\s+(?:above|below))",
+            r"(?:(?P<timeframe>H4|H1|M30|M15|M5|M1)\s+)?(?P<fast>\d+)\s*/\s*(?P<slow>\d+)\s*(?:EMA|moving average)\s*(?:crossover|cross(?:es)?\s+(?:above|below))",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.I):
+                timeframe = (match.groupdict().get("timeframe") or default_timeframe).upper()
+                fast_value = match.groupdict().get("fast")
+                slow_value = match.groupdict().get("slow")
+                if fast_value is None or slow_value is None:
+                    continue
+                fast = int(fast_value)
+                slow = int(slow_value)
+                lower = match.group(0).lower()
+                operator = "cross_above" if "above" in lower or "bull" in lower else "cross_below"
+                if "below" in lower or "bear" in lower:
+                    operator = "cross_below"
+                conditions.append(
+                    StrategyCondition(
+                        indicator="EMA_CROSS",
+                        operator=operator,
+                        value=slow,
+                        period=fast,
+                        timeframe=timeframe,
+                    )
+                )
+        return conditions
 
     # ========================================================
     # MOVING AVERAGE CONDITIONS
@@ -316,6 +392,30 @@ class StrategyParser:
                 less\s+than
                 |
                 <
+                |
+                is\s+above
+                |
+                is\s+below
+                |
+                is\s+greater\s+than
+                |
+                is\s+less\s+than
+                |
+                drops\s+below
+                |
+                falls\s+below
+                |
+                declines\s+below
+                |
+                closes\s+below
+                |
+                rises\s+above
+                |
+                closes\s+above
+                |
+                stays\s+above
+                |
+                stays\s+below
             )
 
             \s*
@@ -356,6 +456,13 @@ class StrategyParser:
                 "above",
                 "greater than",
                 ">",
+                "is above",
+                "is greater than",
+                "above 0",
+                "rises above",
+                "closes above",
+                "stays above",
+                "drops above",
             }:
 
                 operator = ">"
@@ -364,6 +471,13 @@ class StrategyParser:
                 "below",
                 "less than",
                 "<",
+                "is below",
+                "is less than",
+                "drops below",
+                "falls below",
+                "declines below",
+                "closes below",
+                "stays below",
             }:
 
                 operator = "<"
