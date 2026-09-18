@@ -2,7 +2,6 @@ import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from backend.engine.strategy_analysis.analysis_service import StrategyAnalysisService
@@ -78,6 +77,3 @@ def analyze_strategy(request: StrategyRequest):
             status_code=500,
             detail=str(error),
         )
-
-
-TestClient = TestClient
