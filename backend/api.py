@@ -1,9 +1,29 @@
+import os
+
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from backend.engine.strategy_interpreter.parser import StrategyParser
 
 app = FastAPI(title="NEXA FUNDS AI")
+
+frontend_origin = os.getenv(
+    "NEXAFUNDS_FRONTEND_ORIGIN",
+    "https://nexafunds.vercel.app",
+).rstrip("/")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        frontend_origin,
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 
 class StrategyRequest(BaseModel):
