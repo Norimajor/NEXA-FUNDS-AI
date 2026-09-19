@@ -133,6 +133,65 @@ class TestStrategyAnalysis(unittest.TestCase):
         import json
         json.dumps(result)
 
+    def test_incomplete_strategy_returns_structured_validation(self):
+        service = StrategyAnalysisService(data_directory=str(Path("backend/data")))
+        result = service.analyze("Describe a strategy for me.")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["validation"]["status"], "invalid")
+        self.assertEqual(result["test"]["status"], "invalid")
+        self.assertEqual(result["test"]["metrics"], {})
+        self.assertTrue(result["validation"]["errors"])
+
+    def test_unavailable_data_is_explicit_and_has_no_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = StrategyAnalysisService(data_directory=tmp_dir).analyze("Buy EURUSD when RSI is below 30.")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["test"]["status"], "unavailable")
+        self.assertIn("Data unavailable", result["test"]["reason"])
+        self.assertNotIn("win_rate", result["test"])
+        self.assertIn("assumptions", result["strategy"])
+
+    def test_structured_report_uses_measured_metrics_and_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "EURUSD_M15.csv"
+            frame = self._sample_frame()
+            frame["close"] = [1.1000 + 0.0012 * math.sin(i / 7.5) + 0.0003 * ((i % 11) - 5) / 11.0 for i in range(len(frame))]
+            frame["open"] = frame["close"] - 0.00015
+            frame["high"] = frame["close"] + 0.0005
+            frame["low"] = frame["close"] - 0.0005
+            frame.to_csv(path, index=False)
+            result = StrategyAnalysisService(data_directory=tmp_dir).analyze("Buy EURUSD when RSI is below 70.")
+        self.assertEqual(result["test"]["status"], "completed")
+        metrics = result["test"]["metrics"]
+        self.assertEqual(metrics["trades"], metrics["wins"] + metrics["losses"])
+        self.assertIsNotNone(metrics["gross_profit"])
+        self.assertIsNotNone(metrics["gross_loss"])
+        self.assertIsNotNone(metrics["expectancy"])
+        self.assertIsNotNone(metrics["average_trade_duration_minutes"])
+        self.assertIn("performance_analysis", result)
+        self.assertTrue(result["recommendations"])
+        self.assertEqual(result["optimization"]["baseline"]["trades"], metrics["trades"])
+        self.assertTrue(result["candidates"])
+        self.assertTrue(all(candidate["results"]["status"] in {"completed", "no_trades"} for candidate in result["candidates"]))
+
+    def test_api_analyze_preserves_structured_response_contract(self):
+        client = TestClient(app)
+        response = client.post("/analyze", json={"prompt": "Buy EURUSD when RSI is below 30."})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["success"])
+        self.assertIn("strategy", body)
+        self.assertIn("test", body)
+        self.assertIn("performance_analysis", body)
+        self.assertIn("recommendations", body)
+        self.assertIn("candidates", body)
+        self.assertIn("robustness", body)
+
+    def test_api_rejects_invalid_input(self):
+        client = TestClient(app)
+        response = client.post("/analyze", json={"prompt": "   "})
+        self.assertEqual(response.status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

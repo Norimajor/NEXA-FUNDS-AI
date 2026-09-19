@@ -1,4 +1,5 @@
 import math
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -53,10 +54,11 @@ class StrategyAnalysisService:
         symbol = strategy.symbol
         timeframe = strategy.timeframe
         data_info = self._load_market_data(symbol, timeframe)
+        assumptions = self._assumptions_for(prompt, strategy)
 
         report = {
             "success": True,
-            "strategy": self._serialize_strategy(strategy),
+            "strategy": self._serialize_strategy(strategy, assumptions),
             "validation": {
                 "status": "valid" if validation["valid"] else "invalid",
                 "errors": validation.get("errors", []),
@@ -64,13 +66,27 @@ class StrategyAnalysisService:
             },
             "data": data_info,
             "backtest": {"status": "unavailable", "reason": "No backtest executed."},
+            "test": {"status": "unavailable", "reason": "No backtest executed."},
+            "performance_analysis": self._empty_performance_analysis(),
             "regimes": [],
             "weaknesses": [],
             "improvements": [],
             "optimization": {"status": "skipped", "candidates": []},
+            "recommendations": [],
+            "candidates": [],
+            "robustness": self._empty_robustness(),
             "walk_forward": {"status": "skipped", "windows": [], "summary": "Walk-forward validation was skipped."},
             "summary": "",
         }
+
+        if not validation["valid"]:
+            report["test"] = {
+                "status": "invalid",
+                "reason": "The strategy cannot be tested until the validation errors are resolved.",
+                "metrics": {},
+            }
+            report["summary"] = "The strategy description was parsed, but critical rules are missing: " + "; ".join(validation["errors"])
+            return report
 
         if data_info["status"] == "unavailable":
             if self._is_logically_impossible_strategy(strategy, prompt):
@@ -95,11 +111,21 @@ class StrategyAnalysisService:
                     "streaks": {"max_winning_streak": 0, "max_losing_streak": 0},
                 }
                 report["summary"] = f"The strategy for {symbol} {timeframe} is logically impossible under the selected indicator thresholds, so it would never generate a valid trade."
+                report["test"] = {
+                    "status": "no_trades",
+                    "reason": report["backtest"]["reason"],
+                    "metrics": report["backtest"],
+                }
                 return report
 
             report["backtest"] = {
                 "status": "unavailable",
                 "reason": data_info.get("reason") or f"Historical data for {symbol} {timeframe} is not available.",
+            }
+            report["test"] = {
+                "status": "unavailable",
+                "reason": "Data unavailable for this test. " + report["backtest"]["reason"],
+                "data_required": f"Historical OHLCV data for {symbol} {timeframe}.",
             }
             report["summary"] = f"No historical data was available for {symbol} {timeframe}, so no real backtest could be produced."
             return report
@@ -107,10 +133,15 @@ class StrategyAnalysisService:
         try:
             benchmark = self._evaluate_strategy(strategy, data_info)
             report["backtest"] = benchmark["backtest"]
+            report["test"] = benchmark["test"]
+            report["performance_analysis"] = benchmark["performance_analysis"]
             report["regimes"] = benchmark.get("regimes", [])
             report["weaknesses"] = benchmark.get("weaknesses", [])
             report["improvements"] = benchmark.get("improvements", [])
             report["optimization"] = benchmark.get("optimization", {"status": "skipped", "candidates": []})
+            report["recommendations"] = benchmark.get("recommendations", [])
+            report["candidates"] = benchmark.get("candidates", [])
+            report["robustness"] = benchmark.get("robustness", self._empty_robustness())
             report["walk_forward"] = benchmark.get("walk_forward", {"status": "skipped", "windows": [], "summary": "Walk-forward validation was skipped."})
             report["summary"] = benchmark.get("summary", report["summary"])
         except Exception as exc:
@@ -118,13 +149,19 @@ class StrategyAnalysisService:
                 "status": "error",
                 "reason": str(exc),
             }
+            report["test"] = {
+                "status": "error",
+                "reason": "The strategy could not be tested because the analysis engine raised an error.",
+                "details": str(exc),
+            }
             report["summary"] = f"The strategy could not be fully analyzed because: {exc}"
 
         return report
 
-    def _serialize_strategy(self, strategy: StrategyDefinition) -> dict[str, Any]:
+    def _serialize_strategy(self, strategy: StrategyDefinition, assumptions: list[str] | None = None) -> dict[str, Any]:
         return {
             "name": strategy.name,
+            "instrument": strategy.symbol,
             "symbol": strategy.symbol,
             "timeframe": strategy.timeframe,
             "direction": strategy.direction,
@@ -139,8 +176,52 @@ class StrategyAnalysisService:
                 }
                 for condition in strategy.entry_conditions
             ],
+            "exit_conditions": [self._serialize_condition(condition) for condition in strategy.exit_conditions],
+            "filters": [self._serialize_condition(condition) for condition in strategy.filters],
             "risk_percent": strategy.risk_percent,
             "risk_reward": strategy.risk_reward,
+            "assumptions": assumptions or [],
+        }
+
+    def _serialize_condition(self, condition) -> dict[str, Any]:
+        return {
+            "indicator": condition.indicator,
+            "operator": condition.operator,
+            "value": condition.value,
+            "period": condition.period,
+            "timeframe": condition.timeframe,
+            "side": condition.side,
+        }
+
+    def _assumptions_for(self, prompt: str, strategy: StrategyDefinition) -> list[str]:
+        assumptions = []
+        if not any(symbol in prompt.upper() for symbol in ("XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF", "EURJPY", "GBPJPY", "AUDJPY", "NAS100", "US30", "BTCUSD", "ETHUSD")):
+            assumptions.append(f"Instrument defaulted to {strategy.symbol} because no supported instrument was named.")
+        if not any(token in prompt.upper() for token in ("M1", "M5", "M15", "M30", "H1", "H4", "1M", "5M", "15M", "30M", "1H", "4H")):
+            assumptions.append(f"Timeframe defaulted to {strategy.timeframe} because no supported timeframe was named.")
+        if not any(token in prompt.lower() for token in ("risk", "stop", "sl")):
+            assumptions.append("Stop distance was inferred from the median available ATR, capped to the engine safety bounds.")
+        if not any(token in prompt.lower() for token in ("risk reward", "risk/reward", "rr", "take profit", "target")):
+            assumptions.append(f"Risk/reward defaulted to {strategy.risk_reward:.2f}:1 because no exit target was specified.")
+        return assumptions
+
+    def _empty_performance_analysis(self) -> dict[str, Any]:
+        return {
+            "strengths": [],
+            "weaknesses": [],
+            "profitable_conditions": [],
+            "poor_conditions": [],
+            "regime_analysis": {},
+            "session_analysis": {},
+            "limitations": [],
+        }
+
+    def _empty_robustness(self) -> dict[str, Any]:
+        return {
+            "status": "not_available",
+            "walk_forward_available": False,
+            "observations": [],
+            "windows": [],
         }
 
     def _is_logically_impossible_strategy(self, strategy: StrategyDefinition, prompt: str | None = None) -> bool:
@@ -241,108 +322,298 @@ class StrategyAnalysisService:
         dataframe = dataframe.sort_values("timestamp").reset_index(drop=True)
 
         if len(dataframe) < 20:
+            reason = f"Not enough candles for a reliable backtest on {strategy.symbol} {strategy.timeframe}."
             return {
                 "backtest": {
                     "status": "insufficient_data",
-                    "reason": f"Not enough candles for a reliable backtest on {strategy.symbol} {strategy.timeframe}.",
+                    "reason": reason,
+                },
+                "test": {"status": "insufficient_data", "reason": reason, "metrics": {}},
+                "performance_analysis": {
+                    **self._empty_performance_analysis(),
+                    "limitations": [reason],
                 },
                 "regimes": [],
                 "weaknesses": [],
                 "improvements": [],
                 "optimization": {"status": "skipped", "candidates": []},
+                "recommendations": [],
+                "candidates": [],
+                "robustness": self._empty_robustness(),
                 "walk_forward": {"status": "insufficient_data", "windows": [], "summary": "Not enough data for walk-forward validation."},
-                "summary": f"There were insufficient historical candles for {strategy.symbol} {strategy.timeframe}, so no robust statistical assessment was possible.",
+                "summary": reason,
             }
 
-        indicator_data = self.indicator_engine.build(strategy.symbol, [strategy.timeframe])
-        signal_df = self._generate_signal_dataframe(strategy, indicator_data, dataframe)
-
-        backtest_engine = BacktestEngine(initial_balance=10000.0, risk_percent=1.0, reward_risk=2.0, spread=0.0, commission=0.0)
-        result = backtest_engine.run(signal_df, stop_distance=self._infer_stop_distance(strategy, dataframe))
-        trades = result.get("trades", pd.DataFrame())
-        performance = PerformanceEngine(initial_balance=10000.0).calculate(trades)
-
-        if len(trades) == 0:
-            backtest = {
-                "status": "no_trades",
-                "reason": "The strategy generated no valid entries during the available historical period.",
-                "period": {"start": dataframe["timestamp"].min().isoformat(), "end": dataframe["timestamp"].max().isoformat()},
-                "candles": int(len(dataframe)),
-                "trades": 0,
-                "winning_trades": 0,
-                "losing_trades": 0,
-                "win_rate": None,
-                "profit_factor": None,
-                "expectancy": None,
-                "net_return": None,
-                "max_drawdown": None,
-                "average_rr": None,
-                "average_win": None,
-                "average_loss": None,
-                "largest_win": None,
-                "largest_loss": None,
-                "streaks": {"max_winning_streak": 0, "max_losing_streak": 0},
-            }
-        else:
-            backtest = {
-                "status": "completed",
-                "period": {"start": dataframe["timestamp"].min().isoformat(), "end": dataframe["timestamp"].max().isoformat()},
-                "candles": int(len(dataframe)),
-                "trades": int(len(trades)),
-                "winning_trades": int(performance.get("winning_trades", 0)),
-                "losing_trades": int(performance.get("losing_trades", 0)),
-                "win_rate": float(performance.get("win_rate", 0.0)) if performance.get("total_trades", 0) else None,
-                "profit_factor": float(performance.get("profit_factor", 0.0)) if performance.get("total_trades", 0) else None,
-                "expectancy": float(performance.get("expectancy", 0.0)) if performance.get("total_trades", 0) else None,
-                "net_return": float(performance.get("net_profit", 0.0)),
-                "max_drawdown": float(performance.get("max_drawdown", 0.0)),
-                "average_rr": None,
-                "average_win": float(performance.get("average_winner", 0.0)),
-                "average_loss": float(performance.get("average_loser", 0.0)),
-                "largest_win": float(trades["pnl"].max()) if not trades.empty else 0.0,
-                "largest_loss": float(trades["pnl"].min()) if not trades.empty else 0.0,
-                "streaks": {
-                    "max_winning_streak": int(performance.get("max_winning_streak", 0)),
-                    "max_losing_streak": int(performance.get("max_losing_streak", 0)),
-                },
-            }
+        run = self._run_backtest(strategy, dataframe)
+        trades = run["trades"]
+        backtest = run["metrics"]
 
         regimes = self._calculate_regimes(dataframe, trades)
         weaknesses = self._calculate_weaknesses(backtest, regimes)
         improvements = self._generate_improvements(weaknesses, strategy)
         optimization = self._generate_optimization(strategy, dataframe)
+        optimization["baseline"] = self._candidate_metrics(backtest)
         walk_forward = self._walk_forward_validation(strategy, dataframe)
+        performance_analysis = self._build_performance_analysis(backtest, regimes, trades)
+        recommendations = self._generate_recommendations(backtest, regimes, performance_analysis, strategy)
         summary = self._generate_summary(strategy, backtest, regimes, weaknesses, optimization, walk_forward)
         return {
             "backtest": backtest,
+            "test": {
+                "status": backtest["status"],
+                "data_period": backtest.get("period"),
+                "metrics": backtest,
+                "reason": backtest.get("reason"),
+            },
+            "performance_analysis": performance_analysis,
             "regimes": regimes,
             "weaknesses": weaknesses,
             "improvements": improvements,
             "optimization": optimization,
+            "recommendations": recommendations,
+            "candidates": optimization.get("candidates", []),
+            "robustness": walk_forward.get("robustness", self._empty_robustness()),
             "walk_forward": walk_forward,
             "summary": summary,
         }
+
+    def _run_backtest(self, strategy: StrategyDefinition, dataframe: pd.DataFrame) -> dict[str, Any]:
+        indicator_frame = self.indicator_engine.calculate_indicators(dataframe.copy())
+        indicator_data = {strategy.timeframe: indicator_frame}
+        signal_df = self._generate_signal_dataframe(strategy, indicator_data, dataframe)
+        backtest_engine = BacktestEngine(
+            initial_balance=10000.0,
+            risk_percent=strategy.risk_percent,
+            reward_risk=strategy.risk_reward,
+            spread=0.0,
+            commission=0.0,
+        )
+        result = backtest_engine.run(signal_df, stop_distance=self._infer_stop_distance(strategy, indicator_frame))
+        trades = result.get("trades", pd.DataFrame())
+        return {"trades": trades, "metrics": self._metrics_from_trades(trades, dataframe, strategy)}
+
+    def _metrics_from_trades(self, trades: pd.DataFrame, dataframe: pd.DataFrame, strategy: StrategyDefinition) -> dict[str, Any]:
+        period = {
+            "start": dataframe["timestamp"].min().isoformat() if not dataframe.empty else None,
+            "end": dataframe["timestamp"].max().isoformat() if not dataframe.empty else None,
+        }
+        base = {
+            "status": "completed" if not trades.empty else "no_trades",
+            "period": period,
+            "candles": int(len(dataframe)),
+            "trades": int(len(trades)),
+            "wins": 0,
+            "losses": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+        }
+        if trades is None or trades.empty:
+            base.update({
+                "reason": "The strategy generated no valid entries during the available historical period.",
+                "win_rate": None,
+                "gross_profit": None,
+                "gross_loss": None,
+                "net_profit": None,
+                "net_return": None,
+                "profit_factor": None,
+                "expectancy": None,
+                "average_win": None,
+                "average_loss": None,
+                "average_rr": None,
+                "max_drawdown": None,
+                "average_drawdown": None,
+                "largest_win": None,
+                "largest_loss": None,
+                "max_winning_streak": None,
+                "max_losing_streak": None,
+                "trade_frequency": None,
+                "average_trade_duration_minutes": None,
+            })
+            return base
+
+        performance = PerformanceEngine(initial_balance=10000.0).calculate(trades)
+        pnl = pd.to_numeric(trades["pnl"], errors="coerce").fillna(0.0)
+        balances = pd.concat([pd.Series([10000.0]), pd.to_numeric(trades["balance"], errors="coerce")], ignore_index=True)
+        drawdowns = balances - balances.cummax()
+        nonzero_drawdowns = drawdowns[drawdowns < 0].abs()
+        durations = (pd.to_datetime(trades["exit_time"]) - pd.to_datetime(trades["entry_time"])).dt.total_seconds() / 60.0
+        stop_distance = (pd.to_numeric(trades["entry"], errors="coerce") - pd.to_numeric(trades["stop_loss"], errors="coerce")).abs()
+        reward_distance = (pd.to_numeric(trades["take_profit"], errors="coerce") - pd.to_numeric(trades["entry"], errors="coerce")).abs()
+        period_days = max((dataframe["timestamp"].max() - dataframe["timestamp"].min()).total_seconds() / 86400.0, 0.0)
+        profit_factor = self._finite_number(performance.get("profit_factor"))
+        base.update({
+            "reason": None,
+            "wins": int(performance.get("winning_trades", 0)),
+            "losses": int(performance.get("losing_trades", 0)),
+            "winning_trades": int(performance.get("winning_trades", 0)),
+            "losing_trades": int(performance.get("losing_trades", 0)),
+            "win_rate": self._finite_number(performance.get("win_rate")),
+            "gross_profit": self._finite_number(performance.get("gross_profit")),
+            "gross_loss": self._finite_number(performance.get("gross_loss")),
+            "net_profit": self._finite_number(performance.get("net_profit")),
+            "net_return": self._finite_number(performance.get("net_profit")),
+            "total_return_percent": self._finite_number((float(performance.get("net_profit", 0.0)) / 10000.0) * 100.0),
+            "profit_factor": profit_factor,
+            "expectancy": self._finite_number(performance.get("expectancy")),
+            "average_win": self._finite_number(performance.get("average_winner")),
+            "average_loss": self._finite_number(performance.get("average_loser")),
+            "average_rr": self._finite_number((reward_distance / stop_distance.replace(0, pd.NA)).dropna().mean()),
+            "max_drawdown": self._finite_number(performance.get("max_drawdown")),
+            "average_drawdown": self._finite_number(nonzero_drawdowns.mean() if not nonzero_drawdowns.empty else 0.0),
+            "largest_win": self._finite_number(pnl.max()),
+            "largest_loss": self._finite_number(pnl.min()),
+            "max_winning_streak": int(performance.get("max_winning_streak", 0)),
+            "max_losing_streak": int(performance.get("max_losing_streak", 0)),
+            "trade_frequency": self._finite_number(len(trades) / period_days) if period_days > 0 else None,
+            "average_trade_duration_minutes": self._finite_number(durations.mean()),
+            "risk_reward": strategy.risk_reward,
+        })
+        base["streaks"] = {
+            "max_winning_streak": base["max_winning_streak"],
+            "max_losing_streak": base["max_losing_streak"],
+        }
+        return base
+
+    def _finite_number(self, value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    def _build_performance_analysis(self, backtest: dict[str, Any], regimes: list[dict[str, Any]], trades: pd.DataFrame) -> dict[str, Any]:
+        analysis = self._empty_performance_analysis()
+        if backtest.get("status") not in {"completed", "no_trades"}:
+            analysis["limitations"].append("Performance attribution requires sufficient historical data and completed trades.")
+            return analysis
+        if backtest.get("status") == "no_trades":
+            analysis["limitations"].append("No condition, regime, or session performance can be attributed because no trades were generated.")
+            return analysis
+
+        if backtest.get("profit_factor") is not None and backtest["profit_factor"] > 1:
+            analysis["strengths"].append({"finding": "Positive gross-profit to gross-loss ratio", "evidence": f"Measured profit factor was {backtest['profit_factor']:.2f} across {backtest['trades']} trades."})
+        if backtest.get("expectancy") is not None and backtest["expectancy"] > 0:
+            analysis["strengths"].append({"finding": "Positive average trade expectancy", "evidence": f"Measured expectancy was {backtest['expectancy']:.6f} per trade."})
+        if backtest.get("max_losing_streak", 0) >= 4:
+            analysis["weaknesses"].append({"finding": "Extended losing streak", "evidence": f"The longest measured losing streak was {backtest['max_losing_streak']} trades."})
+        if backtest.get("max_drawdown") is not None and backtest["max_drawdown"] > 0:
+            analysis["weaknesses"].append({"finding": "Observed drawdown", "evidence": f"Maximum measured drawdown was {backtest['max_drawdown']:.6f}."})
+
+        for item in regimes:
+            analysis["regime_analysis"].setdefault(item["metric"], {})[item["name"]] = {
+                "trades": item["trades"],
+                "win_rate": item["win_rate"],
+                "profit_factor": item["profit_factor"],
+                "net_profit": item.get("net_profit", item.get("net_return")),
+            }
+            target = analysis["profitable_conditions"] if item["profit_factor"] > 1 and item["trades"] > 0 else analysis["poor_conditions"] if item["profit_factor"] < 1 and item["trades"] > 0 else None
+            if target is not None:
+                target.append({
+                    "condition": f"{item['metric']}={item['name']}",
+                    "evidence": f"{item['trades']} trades, {item['win_rate']:.2f}% win rate, profit factor {item['profit_factor']:.2f}.",
+                })
+
+        if trades is not None and not trades.empty:
+            session_groups = trades.copy()
+            session_groups["entry_time"] = pd.to_datetime(session_groups["entry_time"])
+            session_groups["session"] = session_groups["entry_time"].dt.hour.map(self._session_for_hour)
+            for session, group in session_groups.groupby("session"):
+                analysis["session_analysis"][session] = self._summarize_trade_group(group)
+        analysis["limitations"].append("Condition-level attribution is unavailable because the backtest engine records trades, not the individual condition that triggered each entry.")
+        return analysis
+
+    def _summarize_trade_group(self, trades: pd.DataFrame) -> dict[str, Any]:
+        pnl = pd.to_numeric(trades["pnl"], errors="coerce").fillna(0.0)
+        wins = pnl[pnl > 0]
+        losses = pnl[pnl < 0]
+        gross_loss = abs(float(losses.sum()))
+        profit_factor = float(wins.sum()) / gross_loss if gross_loss > 0 else None
+        return {
+            "trades": int(len(trades)),
+            "wins": int(len(wins)),
+            "losses": int(len(losses)),
+            "win_rate": float(len(wins) / len(trades) * 100) if len(trades) else None,
+            "gross_profit": float(wins.sum()),
+            "gross_loss": gross_loss,
+            "net_profit": float(pnl.sum()),
+            "profit_factor": profit_factor,
+            "expectancy": float(pnl.mean()) if len(pnl) else None,
+        }
+
+    def _session_for_hour(self, hour: int) -> str:
+        if 0 <= hour < 7:
+            return "Asia"
+        if 7 <= hour < 13:
+            return "London"
+        if 13 <= hour < 21:
+            return "New York"
+        return "Off-hours"
+
+    def _generate_recommendations(self, backtest: dict[str, Any], regimes: list[dict[str, Any]], performance_analysis: dict[str, Any], strategy: StrategyDefinition) -> list[dict[str, Any]]:
+        recommendations = []
+        if backtest.get("status") == "no_trades":
+            return [{
+                "recommendation": "Revisit the entry thresholds or add a confirmation rule before further testing.",
+                "reason": "The selected rules produced no executable trades in the available history.",
+                "evidence": "Measured trade count was 0; no profitability conclusion is possible.",
+            }]
+        for condition in performance_analysis.get("poor_conditions", [])[:3]:
+            recommendations.append({
+                "recommendation": f"Test filtering or excluding {condition['condition']}.",
+                "reason": "This measured condition had below-1.0 profit factor.",
+                "evidence": condition["evidence"],
+            })
+        if backtest.get("max_losing_streak", 0) >= 4:
+            recommendations.append({
+                "recommendation": "Test a lower risk percentage or a pause after a losing streak.",
+                "reason": "The observed losing streak creates avoidable exposure concentration.",
+                "evidence": f"The measured maximum losing streak was {backtest['max_losing_streak']} trades and maximum drawdown was {backtest.get('max_drawdown')}. ",
+            })
+        if backtest.get("profit_factor") is not None and backtest["profit_factor"] < 1:
+            recommendations.append({
+                "recommendation": "Test stronger confirmation or a different exit configuration.",
+                "reason": "The baseline lost more gross profit than it generated.",
+                "evidence": f"Measured gross profit was {backtest.get('gross_profit')} versus gross loss {backtest.get('gross_loss')}; profit factor was {backtest['profit_factor']:.2f}.",
+            })
+        if not recommendations:
+            recommendations.append({
+                "recommendation": "Test a narrow higher-timeframe trend filter using the supported EMA indicators.",
+                "reason": "The baseline did not expose a dominant measured weakness requiring a specific change.",
+                "evidence": f"The baseline completed with {backtest.get('trades', 0)} trades; this is a hypothesis for further testing, not a guaranteed improvement.",
+            })
+        return recommendations
 
     def _generate_signal_dataframe(self, strategy: StrategyDefinition, indicator_data: dict[str, pd.DataFrame], market_df: pd.DataFrame) -> pd.DataFrame:
         timeframe = strategy.timeframe.upper()
         source = indicator_data.get(timeframe, market_df.copy())
         source = source.copy().sort_values("timestamp").reset_index(drop=True)
-        signal = pd.Series(False, index=source.index, dtype=bool)
+        signal = pd.Series(True, index=source.index, dtype=bool)
+        if not strategy.entry_conditions:
+            signal = pd.Series(False, index=source.index, dtype=bool)
         for condition in strategy.entry_conditions:
             condition_timeframe = (condition.timeframe or timeframe).upper()
             frame = indicator_data.get(condition_timeframe, source)
             if frame.empty:
+                signal &= False
                 continue
             if condition.indicator == "EMA_CROSS":
-                fast = frame[f"EMA_{condition.period}"]
-                slow = frame[f"EMA_{int(condition.value)}"]
+                fast_column = f"EMA_{condition.period}"
+                slow_column = f"EMA_{int(condition.value)}"
+                if fast_column not in frame.columns or slow_column not in frame.columns:
+                    signal &= False
+                    continue
+                fast = frame[fast_column]
+                slow = frame[slow_column]
                 prev_fast = fast.shift(1)
                 prev_slow = slow.shift(1)
                 cond = ((prev_fast <= prev_slow) & (fast > slow)) if condition.operator == "cross_above" else ((prev_fast >= prev_slow) & (fast < slow))
-                signal = signal | cond.fillna(False).astype(bool)
+                signal &= cond.fillna(False).astype(bool).to_numpy()
             else:
                 column = self._resolve_indicator_column(frame, condition.indicator, condition.period)
                 if column is None:
+                    signal &= False
                     continue
                 series = pd.to_numeric(frame[column], errors="coerce")
                 if condition.operator == ">":
@@ -351,7 +622,7 @@ class StrategyAnalysisService:
                     result = series < float(condition.value)
                 else:
                     result = pd.Series(False, index=frame.index)
-                signal = signal | result.fillna(False).astype(bool)
+                signal &= result.fillna(False).astype(bool).to_numpy()
 
         out = source[["timestamp", "open", "high", "low", "close"]].copy()
         is_signal = signal.fillna(False).astype(bool)
@@ -533,44 +804,87 @@ class StrategyAnalysisService:
         return improvements
 
     def _generate_optimization(self, strategy: StrategyDefinition, dataframe: pd.DataFrame) -> dict[str, Any]:
-        candidates = []
         if dataframe.empty:
             return {"status": "skipped", "candidates": []}
 
-        threshold_candidates = [25, 30, 35, 40, 50]
-        if any(c.indicator == "RSI" for c in strategy.entry_conditions):
-            for threshold in threshold_candidates:
-                candidate_df = dataframe.copy()
-                candidate_df["signal"] = False
-                series = pd.to_numeric(candidate_df["close"], errors="coerce")
-                candidate_df["signal"] = series.notna()
-                candidates.append({
-                    "description": f"RSI threshold {threshold}",
-                    "changes": {"RSI": threshold},
-                    "backtest": {
-                        "trades": 0,
-                        "win_rate": None,
-                        "profit_factor": None,
-                        "expectancy": None,
-                        "max_drawdown": None,
-                        "net_return": None,
-                    },
-                })
-        if not candidates:
-            return {"status": "completed", "candidates": []}
-        return {"status": "completed", "candidates": candidates[:5]}
+        rsi_conditions = [condition for condition in strategy.entry_conditions if condition.indicator == "RSI"]
+        if not rsi_conditions:
+            candidates = [
+                {
+                    "name": "Higher-timeframe EMA filter",
+                    "change": "Add a supported EMA trend filter before the existing entry.",
+                    "reason": "EMA indicators are available in the existing indicator engine, but this variation was not automatically tested because the current interpreter does not model filter composition separately.",
+                    "test_status": "not_tested",
+                    "results": None,
+                },
+                {
+                    "name": "ATR volatility filter",
+                    "change": "Require a minimum ATR condition before entry.",
+                    "reason": "ATR is available in the existing indicator engine, but a threshold was not specified by the strategy and should not be invented.",
+                    "test_status": "not_tested",
+                    "results": None,
+                },
+            ]
+            return {"status": "not_tested", "candidates": candidates}
+
+        candidates = []
+        for threshold in [25, 30, 35, 40, 50]:
+            candidate = deepcopy(strategy)
+            for condition in candidate.entry_conditions:
+                if condition.indicator == "RSI":
+                    condition.value = threshold
+            result = self._run_backtest(candidate, dataframe)
+            metrics = result["metrics"]
+            candidates.append({
+                "name": f"RSI threshold {threshold}",
+                "description": f"Use RSI threshold {threshold} for the parsed RSI condition.",
+                "change": {"RSI": threshold},
+                "reason": "This candidate was re-tested on the same historical candles with only the RSI threshold changed.",
+                "test_status": metrics["status"],
+                "results": self._candidate_metrics(metrics),
+                "backtest": self._candidate_metrics(metrics),
+            })
+        return {"status": "completed", "candidates": candidates}
+
+    def _candidate_metrics(self, metrics: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": metrics.get("status"),
+            "trades": metrics.get("trades"),
+            "win_rate": metrics.get("win_rate"),
+            "profit_factor": metrics.get("profit_factor"),
+            "expectancy": metrics.get("expectancy"),
+            "net_profit": metrics.get("net_profit"),
+            "max_drawdown": metrics.get("max_drawdown"),
+        }
 
     def _walk_forward_validation(self, strategy: StrategyDefinition, dataframe: pd.DataFrame) -> dict[str, Any]:
         if len(dataframe) < 60:
-            return {"status": "insufficient_data", "windows": [], "summary": "The dataset was too short for a reliable walk-forward test."}
+            return {
+                "status": "insufficient_data",
+                "windows": [],
+                "summary": "The dataset was too short for a reliable walk-forward test.",
+                "robustness": {
+                    "status": "insufficient_data",
+                    "walk_forward_available": False,
+                    "observations": ["At least 60 candles are required for the configured chronological partitions."],
+                    "windows": [],
+                },
+            }
         engine = WalkForwardEngine(train_size=0.60, test_size=0.20, step_size=0.20)
         windows = engine.generate_windows(len(dataframe))
         if not windows:
-            return {"status": "insufficient_data", "windows": [], "summary": "No valid walk-forward windows were generated from the available data."}
+            return {
+                "status": "insufficient_data",
+                "windows": [],
+                "summary": "No valid walk-forward windows were generated from the available data.",
+                "robustness": self._empty_robustness(),
+            }
         summaries = []
         for window in windows[:3]:
             train = dataframe.iloc[window.train_start:window.train_end]
             test = dataframe.iloc[window.test_start:window.test_end]
+            train_metrics = self._run_backtest(strategy, train)["metrics"]
+            test_metrics = self._run_backtest(strategy, test)["metrics"]
             summaries.append({
                 "window": len(summaries) + 1,
                 "train_candles": int(len(train)),
@@ -579,8 +893,30 @@ class StrategyAnalysisService:
                 "train_end": train["timestamp"].iloc[-1].isoformat() if not train.empty else None,
                 "test_start": test["timestamp"].iloc[0].isoformat() if not test.empty else None,
                 "test_end": test["timestamp"].iloc[-1].isoformat() if not test.empty else None,
+                "train": self._candidate_metrics(train_metrics),
+                "test": self._candidate_metrics(test_metrics),
             })
-        return {"status": "completed", "windows": summaries, "summary": f"Generated {len(summaries)} walk-forward windows using chronological train/test partitions."}
+        profitable_test_windows = sum(1 for window in summaries if (window["test"].get("net_profit") or 0) > 0)
+        test_trades = sum(window["test"].get("trades") or 0 for window in summaries)
+        robustness_status = "inconclusive"
+        observations = [f"Re-tested the frozen strategy across {len(summaries)} chronological train/test windows."]
+        if profitable_test_windows / len(summaries) >= 0.6 and test_trades >= 20:
+            robustness_status = "promising_but_unproven"
+            observations.append(f"{profitable_test_windows} of {len(summaries)} test windows were profitable with {test_trades} out-of-sample trades.")
+        else:
+            observations.append(f"Only {profitable_test_windows} of {len(summaries)} test windows were profitable with {test_trades} out-of-sample trades; the evidence is limited.")
+        robustness = {
+            "status": robustness_status,
+            "walk_forward_available": True,
+            "observations": observations,
+            "windows": summaries,
+        }
+        return {
+            "status": "completed",
+            "windows": summaries,
+            "summary": f"Re-tested the frozen strategy across {len(summaries)} chronological train/test partitions.",
+            "robustness": robustness,
+        }
 
     def _generate_summary(self, strategy: StrategyDefinition, backtest: dict[str, Any], regimes: list[dict[str, Any]], weaknesses: list[dict[str, Any]], optimization: dict[str, Any], walk_forward: dict[str, Any]) -> str:
         if backtest.get("status") in {"unavailable", "insufficient_data", "error"}:
