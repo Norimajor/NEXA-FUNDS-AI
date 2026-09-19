@@ -29,6 +29,7 @@ PAIRS = [
     "USDCAD.m",
     "AUDUSD.m",
     "NZDUSD.m",
+    "XAUUSD.m",
 ]
 
 
