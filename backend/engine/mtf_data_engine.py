@@ -146,6 +146,62 @@ class MTFDataEngine:
 
         return df
 
+    def validate_file(self, symbol: str, timeframe: str) -> dict:
+        """Validate the raw CSV before load() normalizes it for indicators."""
+        path = self.get_file(symbol, timeframe)
+        report = {
+            "status": "invalid",
+            "symbol": symbol.upper(),
+            "timeframe": timeframe.upper(),
+            "source": str(path),
+            "candles": 0,
+            "start": None,
+            "end": None,
+            "missing_periods": 0,
+            "duplicate_timestamps": 0,
+            "invalid_candles": 0,
+            "timezone": "naive",
+            "errors": [],
+        }
+        if not path.exists():
+            report["errors"].append("DATA_NOT_FOUND")
+            return report
+
+        raw = pd.read_csv(path)
+        required = {"timestamp", "open", "high", "low", "close"}
+        missing_columns = sorted(required.difference(raw.columns))
+        if missing_columns:
+            report["errors"].append(f"Missing required columns: {missing_columns}")
+            return report
+
+        timestamps = pd.to_datetime(raw["timestamp"], errors="coerce")
+        numeric = raw[["open", "high", "low", "close"]].apply(pd.to_numeric, errors="coerce")
+        invalid_ohlc = (
+            numeric.isna().any(axis=1)
+            | (numeric["high"] < numeric[["open", "close"]].max(axis=1))
+            | (numeric["low"] > numeric[["open", "close"]].min(axis=1))
+            | (numeric["high"] < numeric["low"])
+        )
+        report["candles"] = int(len(raw))
+        report["duplicate_timestamps"] = int(timestamps.duplicated().sum())
+        report["invalid_candles"] = int((timestamps.isna() | invalid_ohlc).sum())
+        valid_timestamps = timestamps.dropna()
+        if not valid_timestamps.empty:
+            report["start"] = valid_timestamps.min().isoformat()
+            report["end"] = valid_timestamps.max().isoformat()
+            if getattr(valid_timestamps.dt, "tz", None) is not None:
+                report["timezone"] = str(valid_timestamps.dt.tz)
+            expected_minutes = self.TIMEFRAME_MINUTES.get(timeframe.upper())
+            if expected_minutes and len(valid_timestamps) > 1:
+                gaps = valid_timestamps.sort_values().diff().dropna()
+                report["missing_periods"] = int((gaps > pd.Timedelta(minutes=expected_minutes * 1.5)).sum())
+
+        if report["duplicate_timestamps"] or report["invalid_candles"]:
+            report["errors"].append("DATA_QUALITY_FAILURE")
+        else:
+            report["status"] = "valid"
+        return report
+
     # ========================================================
     # LOAD ALL AVAILABLE TIMEFRAMES
     # ========================================================

@@ -10,6 +10,7 @@ class BacktestEngine:
         reward_risk=2.0,
         spread=0.0,
         commission=0.0,
+        stop_on_zero_balance=True,
     ):
 
         self.initial_balance = float(initial_balance)
@@ -17,6 +18,7 @@ class BacktestEngine:
         self.reward_risk = float(reward_risk)
         self.spread = float(spread)
         self.commission = float(commission)
+        self.stop_on_zero_balance = bool(stop_on_zero_balance)
 
     def validate_data(self, data):
 
@@ -70,6 +72,10 @@ class BacktestEngine:
         self,
         data,
         stop_distance,
+        symbol="UNKNOWN",
+        timeframe="UNKNOWN",
+        allow_reentry=True,
+        max_simultaneous_positions=1,
     ):
 
         self.validate_data(data)
@@ -88,6 +94,8 @@ class BacktestEngine:
         balance = self.initial_balance
         trades = []
         position = None
+        trade_id = 0
+        entries_enabled = True
 
         for i in range(len(data)):
 
@@ -175,6 +183,9 @@ class BacktestEngine:
                     balance += pnl
 
                     trades.append({
+                        "trade_id": position["trade_id"],
+                        "symbol": symbol,
+                        "timeframe": timeframe,
                         "entry_time": position["entry_time"],
                         "exit_time": row["timestamp"],
                         "direction": position["direction"],
@@ -184,19 +195,29 @@ class BacktestEngine:
                         "take_profit": position["take_profit"],
                         "size": position["size"],
                         "pnl": pnl,
+                        "gross_pnl": pnl + self.commission,
+                        "commission": self.commission,
+                        "spread": self.spread,
+                        "slippage": 0.0,
+                        "r_multiple": (pnl + self.commission) / (position["size"] * abs(position["entry"] - position["stop_loss"])) if position["size"] else 0.0,
                         "balance": balance,
                         "result": "WIN" if pnl > 0 else "LOSS",
                         "exit_reason": exit_reason,
                     })
 
                     position = None
+                    if self.stop_on_zero_balance and balance <= 0:
+                        entries_enabled = False
+                    entries_enabled = allow_reentry
+                    if self.stop_on_zero_balance and balance <= 0:
+                        entries_enabled = False
                     continue
 
             signal = str(
                 row["signal"]
             ).upper()
 
-            if signal not in {"BUY", "SELL"}:
+            if signal not in {"BUY", "SELL"} or position is not None or not entries_enabled or max_simultaneous_positions < 1:
                 continue
 
             entry = float(row["close"])
@@ -247,6 +268,7 @@ class BacktestEngine:
                 continue
 
             position = {
+                "trade_id": trade_id + 1,
                 "entry_time": row["timestamp"],
                 "direction": signal,
                 "entry": entry,
@@ -254,6 +276,7 @@ class BacktestEngine:
                 "take_profit": take_profit,
                 "size": size,
             }
+            trade_id += 1
 
         if position is not None:
 
@@ -289,6 +312,9 @@ class BacktestEngine:
             balance += pnl
 
             trades.append({
+                "trade_id": position["trade_id"],
+                "symbol": symbol,
+                "timeframe": timeframe,
                 "entry_time": position["entry_time"],
                 "exit_time": last_row["timestamp"],
                 "direction": position["direction"],
@@ -298,6 +324,11 @@ class BacktestEngine:
                 "take_profit": position["take_profit"],
                 "size": position["size"],
                 "pnl": pnl,
+                "gross_pnl": pnl + self.commission,
+                "commission": self.commission,
+                "spread": self.spread,
+                "slippage": 0.0,
+                "r_multiple": (pnl + self.commission) / (position["size"] * abs(position["entry"] - position["stop_loss"])) if position["size"] else 0.0,
                 "balance": balance,
                 "result": "WIN" if pnl > 0 else "LOSS",
                 "exit_reason": "END_OF_DATA",

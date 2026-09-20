@@ -65,6 +65,7 @@ class StrategyAnalysisService:
                 "warnings": validation.get("warnings", []),
             },
             "data": data_info,
+            "trades": [],
             "backtest": {"status": "unavailable", "reason": "No backtest executed."},
             "test": {"status": "unavailable", "reason": "No backtest executed."},
             "performance_analysis": self._empty_performance_analysis(),
@@ -88,7 +89,7 @@ class StrategyAnalysisService:
             report["summary"] = "The strategy description was parsed, but critical rules are missing: " + "; ".join(validation["errors"])
             return report
 
-        if data_info["status"] == "unavailable":
+        if data_info["status"] in {"unavailable", "invalid"}:
             if self._is_logically_impossible_strategy(strategy, prompt):
                 report["backtest"] = {
                     "status": "no_trades",
@@ -119,11 +120,11 @@ class StrategyAnalysisService:
                 return report
 
             report["backtest"] = {
-                "status": "unavailable",
-                "reason": data_info.get("reason") or f"Historical data for {symbol} {timeframe} is not available.",
+                "status": data_info["status"],
+                "reason": data_info.get("reason") or "Real market data failed validation; backtest not run.",
             }
             report["test"] = {
-                "status": "unavailable",
+                "status": data_info["status"],
                 "reason": "Data unavailable for this test. " + report["backtest"]["reason"],
                 "data_required": f"Historical OHLCV data for {symbol} {timeframe}.",
             }
@@ -133,6 +134,7 @@ class StrategyAnalysisService:
         try:
             benchmark = self._evaluate_strategy(strategy, data_info)
             report["backtest"] = benchmark["backtest"]
+            report["trades"] = benchmark.get("trades", [])
             report["test"] = benchmark["test"]
             report["performance_analysis"] = benchmark["performance_analysis"]
             report["regimes"] = benchmark.get("regimes", [])
@@ -173,6 +175,7 @@ class StrategyAnalysisService:
                     "period": condition.period,
                     "timeframe": condition.timeframe,
                     "side": condition.side,
+                    "entry_semantics": condition.entry_semantics,
                 }
                 for condition in strategy.entry_conditions
             ],
@@ -180,6 +183,15 @@ class StrategyAnalysisService:
             "filters": [self._serialize_condition(condition) for condition in strategy.filters],
             "risk_percent": strategy.risk_percent,
             "risk_reward": strategy.risk_reward,
+            "allow_reentry": strategy.allow_reentry,
+            "max_simultaneous_positions": strategy.max_simultaneous_positions,
+            "pyramiding": strategy.pyramiding,
+            "cooldown_bars": strategy.cooldown_bars,
+            "exit_policy": strategy.exit_policy,
+            "stop_loss": strategy.stop_loss,
+            "take_profit": strategy.take_profit,
+            "position_sizing": strategy.position_sizing,
+            "instrument_spec": strategy.instrument_spec,
             "assumptions": assumptions or [],
         }
 
@@ -191,6 +203,7 @@ class StrategyAnalysisService:
             "period": condition.period,
             "timeframe": condition.timeframe,
             "side": condition.side,
+            "entry_semantics": condition.entry_semantics,
         }
 
     def _assumptions_for(self, prompt: str, strategy: StrategyDefinition) -> list[str]:
@@ -254,8 +267,9 @@ class StrategyAnalysisService:
         symbol_upper = symbol.upper()
         timeframe_upper = timeframe.upper()
         file_path = self.data_engine.get_file(symbol_upper, timeframe_upper)
+        quality = self.data_engine.validate_file(symbol_upper, timeframe_upper)
 
-        if not file_path.exists():
+        if quality["status"] == "invalid" and "DATA_NOT_FOUND" in quality["errors"]:
             return {
                 "status": "unavailable",
                 "symbol": symbol_upper,
@@ -265,6 +279,13 @@ class StrategyAnalysisService:
                 "candles": 0,
                 "source": str(file_path),
                 "reason": f"Historical data for {symbol_upper} {timeframe_upper} is not available.",
+                "data_quality": quality,
+            }
+
+        if quality["status"] == "invalid":
+            return {
+                **quality,
+                "reason": "REAL MARKET DATA FAILED VALIDATION - BACKTEST NOT RUN.",
             }
 
         try:
@@ -279,6 +300,7 @@ class StrategyAnalysisService:
                 "candles": 0,
                 "source": str(file_path),
                 "reason": str(exc),
+                "data_quality": quality,
             }
 
         if df.empty:
@@ -291,6 +313,7 @@ class StrategyAnalysisService:
                 "candles": 0,
                 "source": str(file_path),
                 "reason": f"Historical data for {symbol_upper} {timeframe_upper} is empty.",
+                "data_quality": quality,
             }
 
         if not {"timestamp", "open", "high", "low", "close"}.issubset(df.columns):
@@ -303,6 +326,7 @@ class StrategyAnalysisService:
                 "candles": 0,
                 "source": str(file_path),
                 "reason": "Historical data is missing the required OHLC columns.",
+                "data_quality": quality,
             }
 
         df = df.sort_values("timestamp").reset_index(drop=True)
@@ -314,7 +338,17 @@ class StrategyAnalysisService:
             "end": df["timestamp"].max().isoformat() if not df.empty else None,
             "candles": int(len(df)),
             "source": str(file_path),
+            "execution": {
+                    "initial_balance": 10000.0,
+                    "risk_percent": strategy.risk_percent if 'strategy' in locals() else None,
+                    "spread": 0.0,
+                    "commission": 0.0,
+                    "slippage": 0.0,
+                    "same_candle_policy": "stop_loss_first_conservative",
+                    "position_policy": "one_position; persistent conditions trigger only on false_to_true transition",
+                },
             "reason": None,
+            "data_quality": quality,
         }
 
     def _evaluate_strategy(self, strategy: StrategyDefinition, data_info: dict[str, Any]) -> dict[str, Any]:
@@ -359,6 +393,7 @@ class StrategyAnalysisService:
         summary = self._generate_summary(strategy, backtest, regimes, weaknesses, optimization, walk_forward)
         return {
             "backtest": backtest,
+            "trades": self._serialize_trades(trades),
             "test": {
                 "status": backtest["status"],
                 "data_period": backtest.get("period"),
@@ -377,6 +412,17 @@ class StrategyAnalysisService:
             "summary": summary,
         }
 
+    def _serialize_trades(self, trades: pd.DataFrame) -> list[dict[str, Any]]:
+        if trades is None or trades.empty:
+            return []
+        result = trades.copy()
+        for column in result.columns:
+            if "time" in column:
+                result[column] = pd.to_datetime(result[column], errors="coerce").map(
+                    lambda value: value.isoformat() if pd.notna(value) else None
+                )
+        return result.where(pd.notna(result), None).to_dict(orient="records")
+
     def _run_backtest(self, strategy: StrategyDefinition, dataframe: pd.DataFrame) -> dict[str, Any]:
         indicator_frame = self.indicator_engine.calculate_indicators(dataframe.copy())
         indicator_data = {strategy.timeframe: indicator_frame}
@@ -388,7 +434,14 @@ class StrategyAnalysisService:
             spread=0.0,
             commission=0.0,
         )
-        result = backtest_engine.run(signal_df, stop_distance=self._infer_stop_distance(strategy, indicator_frame))
+        result = backtest_engine.run(
+            signal_df,
+            stop_distance=self._infer_stop_distance(strategy, indicator_frame),
+            symbol=strategy.symbol,
+            timeframe=strategy.timeframe,
+            allow_reentry=strategy.allow_reentry,
+            max_simultaneous_positions=strategy.max_simultaneous_positions,
+        )
         trades = result.get("trades", pd.DataFrame())
         return {"trades": trades, "metrics": self._metrics_from_trades(trades, dataframe, strategy)}
 
@@ -404,6 +457,7 @@ class StrategyAnalysisService:
             "trades": int(len(trades)),
             "wins": 0,
             "losses": 0,
+            "breakeven_trades": 0,
             "winning_trades": 0,
             "losing_trades": 0,
         }
@@ -445,6 +499,7 @@ class StrategyAnalysisService:
             "reason": None,
             "wins": int(performance.get("winning_trades", 0)),
             "losses": int(performance.get("losing_trades", 0)),
+            "breakeven_trades": int(len(trades) - performance.get("winning_trades", 0) - performance.get("losing_trades", 0)),
             "winning_trades": int(performance.get("winning_trades", 0)),
             "losing_trades": int(performance.get("losing_trades", 0)),
             "win_rate": self._finite_number(performance.get("win_rate")),
@@ -459,6 +514,7 @@ class StrategyAnalysisService:
             "average_loss": self._finite_number(performance.get("average_loser")),
             "average_rr": self._finite_number((reward_distance / stop_distance.replace(0, pd.NA)).dropna().mean()),
             "max_drawdown": self._finite_number(performance.get("max_drawdown")),
+            "max_drawdown_percent": self._finite_number(performance.get("max_drawdown_percent")),
             "average_drawdown": self._finite_number(nonzero_drawdowns.mean() if not nonzero_drawdowns.empty else 0.0),
             "largest_win": self._finite_number(pnl.max()),
             "largest_loss": self._finite_number(pnl.min()),
@@ -467,6 +523,21 @@ class StrategyAnalysisService:
             "trade_frequency": self._finite_number(len(trades) / period_days) if period_days > 0 else None,
             "average_trade_duration_minutes": self._finite_number(durations.mean()),
             "risk_reward": strategy.risk_reward,
+            "execution": {
+                "initial_balance": 10000.0,
+                "risk_percent": strategy.risk_percent,
+                "position_sizing": strategy.position_sizing,
+                "spread": 0.0,
+                "commission": 0.0,
+                "slippage": 0.0,
+                "same_candle_policy": "stop_loss_first_conservative",
+                "exit_policy": strategy.exit_policy,
+                "stop_loss": strategy.stop_loss,
+                "take_profit": strategy.take_profit,
+                "max_simultaneous_positions": strategy.max_simultaneous_positions,
+                "stop_on_zero_balance": True,
+                "negative_equity_allowed": False,
+            },
         })
         base["streaks"] = {
             "max_winning_streak": base["max_winning_streak"],
@@ -622,6 +693,14 @@ class StrategyAnalysisService:
                     result = series < float(condition.value)
                 else:
                     result = pd.Series(False, index=frame.index)
+                if condition.entry_semantics in {"condition", "candle_close"}:
+                    result = result & ~result.shift(1, fill_value=False)
+                elif condition.entry_semantics == "cross":
+                    previous = series.shift(1)
+                    if condition.operator == "<":
+                        result = (previous >= float(condition.value)) & result
+                    elif condition.operator == ">":
+                        result = (previous <= float(condition.value)) & result
                 signal &= result.fillna(False).astype(bool).to_numpy()
 
         out = source[["timestamp", "open", "high", "low", "close"]].copy()

@@ -107,6 +107,9 @@ class StrategyParser:
             timeframe=detected_timeframe,
             direction=direction,
             entry_conditions=conditions,
+            allow_reentry=True,
+            max_simultaneous_positions=1,
+            pyramiding=False,
         )
 
     def _extract_symbol(self, text: str, default: str) -> str:
@@ -401,21 +404,25 @@ class StrategyParser:
                 |
                 is\s+less\s+than
                 |
-                drops\s+below
-                |
-                falls\s+below
-                |
-                declines\s+below
-                |
-                closes\s+below
-                |
-                rises\s+above
-                |
-                closes\s+above
-                |
-                stays\s+above
-                |
-                stays\s+below
+                        drops\s+below
+                        |
+                        crosses\s+below
+                        |
+                        crosses\s+above
+                        |
+                        falls\s+below
+                        |
+                        declines\s+below
+                        |
+                        closes\s+below
+                        |
+                        rises\s+above
+                        |
+                        closes\s+above
+                        |
+                        stays\s+above
+                        |
+                        stays\s+below
             )
 
             \s*
@@ -439,7 +446,7 @@ class StrategyParser:
             period = (
                 int(period_text)
                 if period_text
-                else None
+                else 14 if indicator == "RSI" else None
             )
 
             operator_text = (
@@ -452,6 +459,10 @@ class StrategyParser:
                 match.group("value")
             )
 
+            entry_semantics = "cross" if "cross" in text[max(0, match.start() - 24):match.start()].lower() else "condition"
+            if operator_text in {"drops below", "crosses below", "falls below", "declines below", "rises above", "crosses above", "closes below", "closes above"}:
+                entry_semantics = "cross"
+
             if operator_text in {
                 "above",
                 "greater than",
@@ -460,6 +471,7 @@ class StrategyParser:
                 "is greater than",
                 "above 0",
                 "rises above",
+                "crosses above",
                 "closes above",
                 "stays above",
                 "drops above",
@@ -474,6 +486,7 @@ class StrategyParser:
                 "is below",
                 "is less than",
                 "drops below",
+                "crosses below",
                 "falls below",
                 "declines below",
                 "closes below",
@@ -496,6 +509,7 @@ class StrategyParser:
                     value=value,
                     period=period,
                     timeframe=condition_timeframe,
+                    entry_semantics=entry_semantics,
                 )
             )
 
