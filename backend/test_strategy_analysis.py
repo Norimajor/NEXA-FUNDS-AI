@@ -39,6 +39,32 @@ class TestStrategyAnalysis(unittest.TestCase):
         self.assertEqual(client.get("/").status_code, 200)
         self.assertEqual(client.get("/health").status_code, 200)
 
+    def test_production_origin_preflight_is_allowed(self):
+        client = TestClient(app)
+        response = client.options(
+            "/analyze",
+            headers={
+                "Origin": "https://nexafunds-steel.vercel.app",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], "https://nexafunds-steel.vercel.app")
+
+    def test_unlisted_origin_preflight_is_rejected(self):
+        client = TestClient(app)
+        response = client.options(
+            "/analyze",
+            headers={
+                "Origin": "https://example.invalid",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("access-control-allow-origin", response.headers)
+
     def test_parser_examples(self):
         parser = StrategyParser()
         xau = parser.parse("Buy XAUUSD when RSI drops below 30 on the 15m chart, exit at 1.5% profit or 0.7% loss.", symbol="XAUUSD", timeframe="M15")
@@ -186,6 +212,16 @@ class TestStrategyAnalysis(unittest.TestCase):
         self.assertIn("recommendations", body)
         self.assertIn("candidates", body)
         self.assertIn("robustness", body)
+
+    def test_api_analyze_returns_cors_header_for_production_origin(self):
+        client = TestClient(app)
+        response = client.post(
+            "/analyze",
+            json={"prompt": "Buy EURUSD when RSI is below 30."},
+            headers={"Origin": "https://nexafunds-steel.vercel.app"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], "https://nexafunds-steel.vercel.app")
 
     def test_api_rejects_invalid_input(self):
         client = TestClient(app)

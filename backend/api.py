@@ -10,13 +10,14 @@ app = FastAPI(title="NEXA FUNDS AI")
 
 frontend_origin = os.getenv(
     "NEXAFUNDS_FRONTEND_ORIGIN",
-    "https://nexafunds.vercel.app",
+    "https://nexafunds-steel.vercel.app",
 ).rstrip("/")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         frontend_origin,
+        "https://nexafunds-steel.vercel.app",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
