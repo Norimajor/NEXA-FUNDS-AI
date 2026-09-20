@@ -1,4 +1,5 @@
 import math
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,9 @@ from backend.engine.validation.walk_forward import WalkForwardEngine
 
 class StrategyAnalysisService:
     def __init__(self, data_directory: str | None = None):
-        self.data_directory = Path(data_directory or "backend/data")
+        default_data_directory = Path(__file__).resolve().parents[2] / "data"
+        configured_data_directory = data_directory or os.getenv("NEXA_FUNDS_DATA_DIR")
+        self.data_directory = Path(configured_data_directory) if configured_data_directory else default_data_directory
         self.parser = StrategyParser()
         self.validator = StrategyValidator()
         self.data_engine = MTFDataEngine(data_directory=str(self.data_directory))

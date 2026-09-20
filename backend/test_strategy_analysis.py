@@ -104,7 +104,7 @@ class TestStrategyAnalysis(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "EURUSD_M15.csv"
             df = self._sample_frame()
-            df["close"] = df["close"] + 0.02
+            df["close"] = df["close"] + 0.0002
             df.to_csv(path, index=False)
             service = StrategyAnalysisService(data_directory=tmp_dir)
             result = service.analyze("Buy EURUSD when RSI is below 70.")

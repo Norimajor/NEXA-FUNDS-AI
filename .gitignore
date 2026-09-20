@@ -21,3 +21,6 @@ optimizer_results.txt
 .DS_Store
 Thumbs.db
 data/
+!backend/data/
+backend/data/*
+!backend/data/XAUUSD_M15.csv
