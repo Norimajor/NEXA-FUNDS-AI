@@ -28,7 +28,7 @@ class StrategyAnalysisService:
         self.data_engine = MTFDataEngine(data_directory=str(self.data_directory))
         self.indicator_engine = MTFIndicatorEngine(data_directory=str(self.data_directory))
 
-    def analyze(self, prompt: str) -> dict[str, Any]:
+    def analyze(self, prompt: str, strategy: StrategyDefinition | None = None) -> dict[str, Any]:
         if prompt is None:
             return {
                 "success": False,
@@ -45,7 +45,7 @@ class StrategyAnalysisService:
             }
 
         try:
-            strategy = self.parser.parse(prompt)
+            strategy = strategy or self.parser.parse(prompt)
             validation = self.validator.validate(strategy)
         except ValueError as exc:
             return {
@@ -56,7 +56,7 @@ class StrategyAnalysisService:
 
         symbol = strategy.symbol
         timeframe = strategy.timeframe
-        data_info = self._load_market_data(symbol, timeframe)
+        data_info = None
         assumptions = self._assumptions_for(prompt, strategy)
 
         report = {
@@ -91,6 +91,9 @@ class StrategyAnalysisService:
             }
             report["summary"] = "The strategy description was parsed, but critical rules are missing: " + "; ".join(validation["errors"])
             return report
+
+        data_info = self._load_market_data(symbol, timeframe)
+        report["data"] = data_info
 
         if data_info["status"] in {"unavailable", "invalid"}:
             if self._is_logically_impossible_strategy(strategy, prompt):
@@ -217,7 +220,7 @@ class StrategyAnalysisService:
             assumptions.append(f"Timeframe defaulted to {strategy.timeframe} because no supported timeframe was named.")
         if not any(token in prompt.lower() for token in ("risk", "stop", "sl")):
             assumptions.append("Stop distance was inferred from the median available ATR, capped to the engine safety bounds.")
-        if not any(token in prompt.lower() for token in ("risk reward", "risk/reward", "rr", "take profit", "target")):
+        if strategy.risk_reward is not None and not any(token in prompt.lower() for token in ("risk reward", "risk/reward", "rr", "take profit", "target")):
             assumptions.append(f"Risk/reward defaulted to {strategy.risk_reward:.2f}:1 because no exit target was specified.")
         return assumptions
 

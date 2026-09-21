@@ -54,10 +54,15 @@ class MTFDataEngine:
             f"_{timeframe}.csv"
         )
 
-        return (
+        path = (
             self.data_directory
             / filename
         )
+        if not path.exists():
+            alternate = Path(__file__).resolve().parents[2] / "data" / f"{symbol.replace('.', '_')}_m_{timeframe}.csv"
+            if alternate.exists():
+                return alternate
+        return path
 
     # ========================================================
     # LOAD ONE TIMEFRAME

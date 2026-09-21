@@ -6,3 +6,4 @@ scipy
 scikit-learn
 pydantic
 python-dotenv
+openai>=1.66.0,<2

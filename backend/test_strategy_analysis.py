@@ -7,6 +7,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from backend.api import app
+from backend.llm.mock_provider import MockLLMProvider
 from backend.engine.strategy_analysis.analysis_service import StrategyAnalysisService
 from backend.engine.strategy_interpreter.parser import StrategyParser
 
@@ -202,7 +203,8 @@ class TestStrategyAnalysis(unittest.TestCase):
 
     def test_api_analyze_preserves_structured_response_contract(self):
         client = TestClient(app)
-        response = client.post("/analyze", json={"prompt": "Buy EURUSD when RSI is below 30."})
+        with unittest.mock.patch("backend.api.get_llm_provider", return_value=MockLLMProvider()):
+            response = client.post("/analyze", json={"prompt": "Buy EURUSD when RSI is below 30."})
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertTrue(body["success"])
@@ -215,11 +217,12 @@ class TestStrategyAnalysis(unittest.TestCase):
 
     def test_api_analyze_returns_cors_header_for_production_origin(self):
         client = TestClient(app)
-        response = client.post(
-            "/analyze",
-            json={"prompt": "Buy EURUSD when RSI is below 30."},
-            headers={"Origin": "https://nexafunds-steel.vercel.app"},
-        )
+        with unittest.mock.patch("backend.api.get_llm_provider", return_value=MockLLMProvider()):
+            response = client.post(
+                "/analyze",
+                json={"prompt": "Buy EURUSD when RSI is below 30."},
+                headers={"Origin": "https://nexafunds-steel.vercel.app"},
+            )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["access-control-allow-origin"], "https://nexafunds-steel.vercel.app")
 
