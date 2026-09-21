@@ -26,6 +26,9 @@ class ConversationStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS user_profiles (user_id TEXT PRIMARY KEY, name TEXT, updated_at TEXT NOT NULL)")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(user_profiles)")}
+            if "onboarding_state" not in columns:
+                db.execute("ALTER TABLE user_profiles ADD COLUMN onboarding_state TEXT NOT NULL DEFAULT 'new'")
             db.execute("""CREATE TABLE IF NOT EXISTS conversation_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, role TEXT NOT NULL,
                 message_json TEXT NOT NULL, created_at TEXT NOT NULL)""")
@@ -41,23 +44,26 @@ class ConversationStore:
 
     def profile(self, user_id: str) -> dict[str, Any]:
         with self._connection() as db:
-            row = db.execute("SELECT name FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
+            row = db.execute("SELECT name, onboarding_state FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
             messages = db.execute(
                 "SELECT role, message_json FROM conversation_messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
                 (user_id, self.max_messages),
             ).fetchall()
-        return {"name": row[0] if row else None, "messages": [
+        return {"name": row[0] if row else None, "onboarding_state": row[1] if row else "new", "messages": [
             {"role": role, **json.loads(payload)} for role, payload in reversed(messages)
         ]}
 
     def save(self, user_id: str, role: str, message: str, **metadata: Any) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connection() as db:
-            if metadata.get("name"):
+            if metadata.get("name") or metadata.get("onboarding_state"):
                 db.execute(
-                    "INSERT INTO user_profiles(user_id,name,updated_at) VALUES(?,?,?) "
-                    "ON CONFLICT(user_id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at",
-                    (user_id, metadata["name"], now),
+                    "INSERT INTO user_profiles(user_id,name,onboarding_state,updated_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET "
+                    "name=COALESCE(excluded.name,user_profiles.name), "
+                    "onboarding_state=COALESCE(excluded.onboarding_state,user_profiles.onboarding_state), "
+                    "updated_at=excluded.updated_at",
+                    (user_id, metadata.get("name"), metadata.get("onboarding_state", "new"), now),
                 )
             db.execute("INSERT INTO conversation_messages(user_id,role,message_json,created_at) VALUES(?,?,?,?)",
                        (user_id, role, json.dumps({"message": message, **metadata}), now))
@@ -70,7 +76,11 @@ class ConversationStore:
 
 
 class IntentClassifier:
-    NAME = re.compile(r"\b(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z '-]{1,40})", re.I)
+    NAME = re.compile(
+        r"\b(?:my name is|i am|i'm|you're speaking with|you are speaking with|speaking with)\s+"
+        r"([A-Za-z][A-Za-z '-]{1,40})",
+        re.I,
+    )
     # Keep this deliberately conservative: ordinary words such as "want" and
     # "best" must never become a fabricated market symbol.
     SYMBOL = re.compile(r"\b([A-Z]{6,}(?:[._-][A-Z0-9]+)?|[A-Z]{2,5}\d{1,4})\b", re.I)
@@ -83,7 +93,11 @@ class IntentClassifier:
         lower = text.lower()
         match = self.NAME.search(text)
         entities = {"name": match.group(1).strip(" .,!") if match else None}
+        if re.fullmatch(r"\s*(yes|yeah|yep|sure|okay|ok|of course)\s*[.!]?\s*", lower):
+            return "affirmative", entities
         if re.search(r"\b(hello|hi|hey|how are you|good morning|good evening)\b", lower):
+            greeting = re.search(r"\b(hello|hi|hey)\b", lower)
+            entities["greeting_word"] = greeting.group(1).capitalize() if greeting else "Hello"
             return "greeting", entities
         if re.search(r"\b(best|profitable|indicator combinations?|combine indicators?|build an ea|ea platform)\b", lower):
             entities.update(self._constraints(text))
@@ -143,15 +157,43 @@ class ConversationalAssistant:
             entities["name"] = profile.get("name")
         if intent == "greeting":
             name = entities.get("name")
-            answer = f"Hello{', ' + name if name else ''}! I'm ready to help with measured strategy research."
+            if name:
+                answer = f"Welcome {name}! Wanna know how I can help you?"
+                state = "awaiting_offer_confirmation"
+            else:
+                greeting = entities.get("greeting_word", "Hello")
+                answer = f"{greeting}, I am NEXAFUNDS AI. Who am I speaking with please?"
+                state = "awaiting_name"
             result = {"intent": intent, "message": answer, "profile": {"name": name}}
+        elif intent == "affirmative" and profile.get("onboarding_state") == "awaiting_offer_confirmation":
+            result = {
+                "intent": "capabilities",
+                "message": (
+                    "I can understand natural-language trading ideas, validate and backtest strategies "
+                    "on downloaded market data, compare indicator combinations, run walk-forward validation, "
+                    "show progress for multi-market searches, rank measured candidates, and prepare "
+                    "EA-ready strategy specifications. I will always distinguish historical evidence "
+                    "from guaranteed profitability. What would you like to build?"
+                ),
+            }
+            state = "active"
         elif intent == "combination_search":
             result = self._combination_search(message, entities, progress_callback=progress_callback)
+            state = "active"
         elif intent == "strategy_analysis":
             result = {"intent": intent, "message": "Please provide a symbol, timeframe, entry rules, risk, and historical data path for a measured analysis."}
+            state = "active"
         else:
             result = {"intent": intent, "message": "I can remember your name and help with evidence-based strategy research. What would you like to explore?"}
-        self.store.save(user_id, "user", message, name=entities.get("name"))
+            state = profile.get("onboarding_state", "active")
+        if entities.get("name") and not profile.get("name"):
+            state = "awaiting_offer_confirmation"
+            result = {
+                "intent": "greeting",
+                "message": f"Welcome {entities['name']}! Wanna know how I can help you?",
+                "profile": {"name": entities["name"]},
+            }
+        self.store.save(user_id, "user", message, name=entities.get("name"), onboarding_state=state)
         self.store.save(user_id, "assistant", result["message"], intent=intent)
         return result
 

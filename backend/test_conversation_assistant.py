@@ -10,6 +10,17 @@ from backend.conversation_assistant import ConversationStore, ConversationalAssi
 
 
 class TestConversationAssistant(unittest.TestCase):
+    def test_greeting_onboarding_uses_greeting_word_and_capabilities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            assistant = ConversationalAssistant(store=ConversationStore(os.path.join(directory, "chat.sqlite3")))
+            greeting = assistant.respond("hey", "u1")
+            introduced = assistant.respond("you're speaking with Obed", "u1")
+            capabilities = assistant.respond("yes", "u1")
+            self.assertEqual(greeting["message"], "Hey, I am NEXAFUNDS AI. Who am I speaking with please?")
+            self.assertEqual(introduced["message"], "Welcome Obed! Wanna know how I can help you?")
+            self.assertEqual(capabilities["intent"], "capabilities")
+            self.assertIn("backtest", capabilities["message"])
+
     def test_greeting_extracts_and_remembers_name(self):
         with tempfile.TemporaryDirectory() as directory:
             assistant = ConversationalAssistant(store=ConversationStore(os.path.join(directory, "chat.sqlite3")))
