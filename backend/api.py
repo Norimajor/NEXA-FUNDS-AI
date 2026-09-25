@@ -10,6 +10,7 @@ from backend.combination_ranking import CombinationRankingService
 from backend.llm.provider import LLMProviderError, get_llm_provider
 from backend.conversation_assistant import ConversationalAssistant
 from backend.backtest_jobs import backtest_jobs
+from backend.web_search import WebSearchError, needs_web_research, web_search
 
 app = FastAPI(title="NEXA FUNDS AI")
 
@@ -71,6 +72,31 @@ def chat(request: ChatRequest):
     if len(message) > 4000:
         raise HTTPException(status_code=400, detail="Message is too long.")
     try:
+        if needs_web_research(message):
+            try:
+                search_results = web_search(message, max_results=5)
+            except WebSearchError as error:
+                return {
+                    "success": True,
+                    "intent": "web_research",
+                    "message": str(error),
+                    "research": {"query": message, "provider": None, "sources": [], "error": str(error)},
+                }
+            return {
+                "success": True,
+                "intent": "web_research",
+                "message": (
+                    "I checked recent sources for the latest information and sorted the most relevant references below. "
+                    "Use these as current evidence, while keeping the NEXAFUNDS backtest results separate from external information."
+                ),
+                "research": {
+                    "query": search_results.get("query", message),
+                    "provider": search_results.get("provider"),
+                    "answer": search_results.get("answer"),
+                    "sources": search_results.get("results", []),
+                },
+            }
+
         intent, entities = ConversationalAssistant().classifier.classify(message)
         if intent == "combination_search" and entities.get("all_downloaded_data"):
             job = backtest_jobs.submit(message, request.user_id or "anonymous")

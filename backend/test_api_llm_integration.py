@@ -86,6 +86,50 @@ class TestAnalyzeLLMIntegration(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         openai_provider.assert_not_called()
 
+    def test_chat_skips_web_search_for_normal_greeting(self):
+        with patch("backend.api.web_search", create=True) as mocked_search:
+            response = self.client.post("/chat", json={"message": "Hello, how are you?"})
+
+        self.assertEqual(response.status_code, 200)
+        mocked_search.assert_not_called()
+        self.assertIn("message", response.json())
+
+    def test_chat_uses_web_search_for_current_fed_rate(self):
+        fake_results = [{
+            "title": "Federal Reserve Policy",
+            "url": "https://example.com/fed-rate",
+            "snippet": "The Federal Reserve kept rates unchanged.",
+            "source": "Federal Reserve",
+            "published_date": "2026-09-25",
+        }]
+
+        with patch("backend.api.web_search", create=True, return_value={
+            "query": "current Federal Funds Rate",
+            "results": fake_results,
+            "provider": "tavily",
+        }) as mocked_search:
+            response = self.client.post(
+                "/chat",
+                json={"message": "What is the current Federal Funds Rate?"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        mocked_search.assert_called_once()
+        body = response.json()
+        self.assertEqual(body["intent"], "web_research")
+        self.assertIn("Federal Reserve", body["research"]["sources"][0]["source"])
+
+    def test_chat_avoids_web_search_for_backtest_requests(self):
+        with patch("backend.api.web_search", create=True) as mocked_search:
+            response = self.client.post(
+                "/chat",
+                json={"message": "Backtest RSI below 30 on XAUUSD M15."},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        mocked_search.assert_not_called()
+        self.assertIn("strategy", response.json().get("intent", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

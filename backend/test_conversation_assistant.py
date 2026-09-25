@@ -104,6 +104,61 @@ class TestConversationAssistant(unittest.TestCase):
             self.assertTrue(any("Missing required" in item["reason"] for item in result["skipped_datasets"]))
             self.assertTrue(any("Unsupported timeframe" in item["reason"] for item in result["skipped_datasets"]))
 
+    def test_follow_up_requests_resolve_previous_strategy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = Mock()
+            service.analyze.side_effect = [
+                {
+                    "success": True,
+                    "strategy": {"symbol": "XAUUSD", "timeframe": "M15", "direction": "LONG"},
+                    "summary": "Created and validated the strategy.",
+                    "backtest": {"status": "completed", "trades": 12, "net_return": 3.2, "win_rate": 58, "max_drawdown": 6},
+                    "validation": {"valid": True},
+                },
+                {
+                    "success": True,
+                    "strategy": {"symbol": "XAUUSD", "timeframe": "M15", "direction": "LONG"},
+                    "summary": "Backtest completed.",
+                    "backtest": {"status": "completed", "trades": 12, "net_return": 3.2, "win_rate": 58, "max_drawdown": 6},
+                    "validation": {"valid": True},
+                },
+            ]
+            assistant = ConversationalAssistant(store=ConversationStore(os.path.join(directory, "follow_up.sqlite3")), analysis_service=service)
+            assistant.respond("Build an XAUUSD M15 strategy that goes long when RSI is below 30.", "u1")
+            result = assistant.respond("Test it.", "u1")
+            self.assertEqual(result["intent"], "backtest_request")
+            self.assertEqual(service.analyze.call_count, 2)
+            self.assertIn("XAUUSD", result["message"])
+
+    def test_strategy_modification_and_backtest_analysis_use_recent_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = Mock()
+            service.analyze.side_effect = [
+                {
+                    "success": True,
+                    "strategy": {"symbol": "XAUUSD", "timeframe": "M15", "direction": "LONG"},
+                    "summary": "Created and validated the strategy.",
+                    "backtest": {"status": "completed", "trades": 8, "net_return": -2.1, "win_rate": 38, "max_drawdown": 14},
+                    "validation": {"valid": True},
+                },
+                {
+                    "success": True,
+                    "strategy": {"symbol": "XAUUSD", "timeframe": "M15", "direction": "LONG"},
+                    "summary": "Backtest completed.",
+                    "backtest": {"status": "completed", "trades": 8, "net_return": -2.1, "win_rate": 38, "max_drawdown": 14},
+                    "validation": {"valid": True},
+                },
+            ]
+            assistant = ConversationalAssistant(store=ConversationStore(os.path.join(directory, "context.sqlite3")), analysis_service=service)
+            assistant.respond("Build an XAUUSD M15 strategy that goes long when RSI is below 30.", "u1")
+            update = assistant.respond("Change the EMA to 50.", "u1")
+            self.assertEqual(update["intent"], "strategy_modification")
+            self.assertIn("EMA 50", update["message"])
+            assistant.respond("Test that.", "u1")
+            analysis = assistant.respond("Why did it perform badly?", "u1")
+            self.assertEqual(analysis["intent"], "backtest_analysis")
+            self.assertIn("max drawdown", analysis["message"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

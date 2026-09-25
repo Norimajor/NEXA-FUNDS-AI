@@ -81,12 +81,15 @@ class IntentClassifier:
         r"([A-Za-z][A-Za-z '-]{1,40})",
         re.I,
     )
-    # Keep this deliberately conservative: ordinary words such as "want" and
-    # "best" must never become a fabricated market symbol.
     SYMBOL = re.compile(r"\b([A-Z]{6,}(?:[._-][A-Z0-9]+)?|[A-Z]{2,5}\d{1,4})\b", re.I)
     TIMEFRAME = re.compile(r"\b(M1|M5|M15|M30|H1|H4|D1|1m|5m|15m|30m|1h|4h|daily)\b", re.I)
     RISK = re.compile(r"\b(?:risk|risk per trade|drawdown)\s*(?:of|is|at)?\s*(\d+(?:\.\d+)?)\s*%?", re.I)
     PLATFORM = re.compile(r"\b(MT4|MT5|MetaTrader\s*[45]|TradingView|cTrader)\b", re.I)
+    INDICATORS = (
+        "RSI", "EMA", "MACD", "ADX", "ATR", "STOCHASTIC", "BOLLINGER", "CCI",
+        "WILLIAMS %R", "MFI", "VWAP", "OBV", "SAR", "ICHIMOKU", "DONCHIAN",
+        "SUPERTREND", "SUPPLY", "DEMAND", "MOMENTUM", "ROC", "TREND",
+    )
 
     def classify(self, message: str) -> tuple[str, dict[str, Any]]:
         text = message.strip()
@@ -99,6 +102,25 @@ class IntentClassifier:
             greeting = re.search(r"\b(hello|hi|hey)\b", lower)
             entities["greeting_word"] = greeting.group(1).capitalize() if greeting else "Hello"
             return "greeting", entities
+        if re.search(r"\b(?:what\s+is|what\s+are|explain|describe|tell\s+me\s+about)\b", lower):
+            if re.search(r"\b(?:rsi|macd|ema|adx|atr|bollinger|stochastic|cci|mfi|williams|vwap|ichimoku|supertrend|sar|supply|demand)\b", lower):
+                return "indicator_explanation", entities
+            return "education", entities
+        if re.search(r"\b(?:test|backtest|run|analyze|evaluate)\b", lower) and (
+            re.search(r"\b(?:it|that|this|strategy|previous|last)\b", lower)
+            or re.search(r"\bstrategy\b", lower)
+        ):
+            return "backtest_request", entities
+        if re.search(r"\b(?:why\s+did|what\s+caused|why\s+did\s+it|what\s+explains|why\s+did\s+it\s+perform|why\s+did\s+it\s+lose)\b", lower):
+            return "backtest_analysis", entities
+        if re.search(r"\b(?:optimize|improve|refine|tune|make\s+it\s+better|be\s+more\s+strict|make\s+it\s+stricter)\b", lower):
+            return "optimization_request", entities
+        if re.search(r"\b(?:change|modify|update|replace|remove|use|switch|make)\b", lower) and re.search(r"\b(?:ema|rsi|macd|adx|atr|stochastic|bollinger|cci|mfi|williams|vwap|ichimoku|supertrend|sar|indicator|trend)\b", lower):
+            return "strategy_modification", entities
+        if re.search(r"\b(?:build|create|design|draft|write|develop|construct)\b.*\b(?:strategy|system|setup)\b", lower):
+            return "strategy_creation", entities
+        if re.search(r"\b(?:go\s+long|go\s+short|buy\s+when|sell\s+when|long\s+when|short\s+when|when\s+rsi\s+is|ema\s+cross|price\s+above\s+the\s+\d+\s+ema|price\s+below\s+the\s+\d+\s+ema)\b", lower):
+            return "strategy_creation", entities
         if re.search(r"\b(best|profitable|indicator combinations?|combine indicators?|build an ea|ea platform)\b", lower):
             entities.update(self._constraints(text))
             entities["all_downloaded_data"] = bool(re.search(
@@ -108,9 +130,9 @@ class IntentClassifier:
                 entities["symbol"] = None
                 entities["timeframe"] = None
             return "combination_search", entities
-        if re.search(r"\b(strategy|backtest|buy|sell|entry|stop loss|take profit|analy[sz]e)\b", lower):
+        if re.search(r"\b(strategy|backtest|buy|sell|entry|stop loss|take profit|analy[sz]e|risk|timeframe|symbol)\b", lower):
             return "strategy_analysis", entities
-        return "casual", entities
+        return "general_conversation", entities
 
     def _constraints(self, text: str) -> dict[str, Any]:
         symbol_values = [match.group(1).upper() for match in self.SYMBOL.finditer(text)]
@@ -147,53 +169,270 @@ class ConversationalAssistant:
         self.store = store or ConversationStore()
         self.analysis_service = analysis_service or StrategyAnalysisService()
         self.classifier = IntentClassifier()
+        self._session_state: dict[str, dict[str, Any]] = {}
+
+    def _session(self, user_id: str) -> dict[str, Any]:
+        return self._session_state.setdefault(user_id, {
+            "last_strategy_text": None,
+            "last_strategy": None,
+            "last_backtest": None,
+            "last_summary": None,
+            "last_intent": None,
+            "current_topic": None,
+        })
+
+    def _resolve_reference(self, message: str, state: dict[str, Any]) -> str | None:
+        lower = message.lower()
+        if "test it" in lower or "test that" in lower or "backtest it" in lower or "run it" in lower or "try it again" in lower:
+            return state.get("last_strategy_text")
+        if "that strategy" in lower or "this strategy" in lower or "previous strategy" in lower or "the previous strategy" in lower:
+            return state.get("last_strategy_text")
+        if "previous test" in lower or "last test" in lower or "that test" in lower:
+            return state.get("last_strategy_text")
+        if re.search(r"\b(?:it|that|this)\b", lower) and state.get("last_strategy_text"):
+            return state.get("last_strategy_text")
+        return None
+
+    def _modify_strategy_text(self, strategy_text: str, message: str) -> str:
+        text = strategy_text
+        lower = message.lower()
+        if any(fragment in lower for fragment in ("ema 50", "ema fifty", "ema to 50", "use 50 ema", "make the ema 50", "change the ema to 50")):
+            if re.search(r"\bEMA\s*[_-]?\d+\b", text, flags=re.I):
+                text = re.sub(r"\bEMA\s*[_-]?\d+\b", "EMA 50", text, flags=re.I)
+                text = re.sub(r"\bema\s*[_-]?\d+\b", "EMA 50", text, flags=re.I)
+                return text
+            if text.rstrip().endswith("."):
+                text = text.rstrip(".")
+            return f"{text} and EMA 50 trend filter."
+        if any(fragment in lower for fragment in ("ema 200", "ema to 200", "change the ema to 200")):
+            if re.search(r"\bEMA\s*[_-]?\d+\b", text, flags=re.I):
+                text = re.sub(r"\bEMA\s*[_-]?\d+\b", "EMA 200", text, flags=re.I)
+                text = re.sub(r"\bema\s*[_-]?\d+\b", "EMA 200", text, flags=re.I)
+                return text
+            if text.rstrip().endswith("."):
+                text = text.rstrip(".")
+            return f"{text} and EMA 200 trend filter."
+        if "remove rsi" in lower or "drop rsi" in lower:
+            text = re.sub(r"\b[^.]*RSI[^.]*[.;]?\s*", "", text, flags=re.I)
+            return text.strip()
+        if "remove macd" in lower or "drop macd" in lower:
+            text = re.sub(r"\b[^.]*MACD[^.]*[.;]?\s*", "", text, flags=re.I)
+            return text.strip()
+        if re.search(r"\b(?:rsi\s+below\s+(\d+)|rsi\s+under\s+(\d+)|rsi\s+is\s+below\s+(\d+))\b", lower):
+            match = re.search(r"\b(?:rsi\s+below\s+(\d+)|rsi\s+under\s+(\d+)|rsi\s+is\s+below\s+(\d+))\b", lower)
+            threshold = next(group for group in match.groups() if group is not None)
+            text = re.sub(r"RSI\s+(?:below|under|is\s+below)\s+\d+", f"RSI below {threshold}", text, flags=re.I)
+            return text
+        return text
+
+    def _handle_backtest_request(self, message: str, user_id: str, state: dict[str, Any]) -> dict[str, Any]:
+        strategy_text = self._resolve_reference(message, state) or message
+        if self._is_vague_strategy_request(strategy_text):
+            return {
+                "intent": "clarification_needed",
+                "message": "I need the symbol, timeframe, and entry rules before I can backtest it. If you want, say: 'XAUUSD M15 long when RSI is below 30.'",
+            }
+        try:
+            report = self.analysis_service.analyze(strategy_text)
+        except Exception as exc:
+            return {
+                "intent": "clarification_needed",
+                "message": f"I couldn't turn that into a valid strategy: {exc}",
+            }
+        state["last_strategy_text"] = strategy_text
+        state["last_strategy"] = report.get("strategy")
+        state["last_backtest"] = report
+        state["last_summary"] = report.get("summary")
+        state["last_intent"] = "backtest_request"
+        if not report.get("success"):
+            return {
+                "intent": "clarification_needed",
+                "message": report.get("error") or "I need clearer rules before I can test it.",
+            }
+        metrics = report.get("backtest", {})
+        trade_count = metrics.get("trades") if isinstance(metrics, dict) else None
+        net_return = metrics.get("net_return") if isinstance(metrics, dict) else None
+        symbol = (report.get("strategy") or {}).get("symbol") or (state.get("last_strategy") or {}).get("symbol") or "the instrument"
+        summary = f"I tested {symbol} and the measured backtest result is: {metrics.get('status', 'completed')}."
+        if trade_count is not None:
+            summary += f" Trades: {trade_count}."
+        if net_return is not None:
+            summary += f" Net return: {net_return}."
+        return {
+            "intent": "backtest_request",
+            "message": summary,
+            "strategy": report.get("strategy"),
+            "backtest": report.get("backtest"),
+            "test": report.get("test"),
+        }
+
+    def _handle_backtest_analysis(self, message: str, user_id: str, state: dict[str, Any]) -> dict[str, Any]:
+        last_backtest = state.get("last_backtest") or {}
+        if not last_backtest:
+            return {
+                "intent": "backtest_analysis",
+                "message": "I don't have a recent backtest result to analyze yet. Tell me which strategy to test or run a backtest first.",
+            }
+        metrics = last_backtest.get("backtest", {}) if isinstance(last_backtest, dict) else {}
+        net_return = metrics.get("net_return")
+        win_rate = metrics.get("win_rate")
+        max_drawdown = metrics.get("max_drawdown")
+        return {
+            "intent": "backtest_analysis",
+            "message": (
+                f"The previous backtest showed net return {net_return} and max drawdown {max_drawdown}. "
+                f"Win rate was {win_rate}. I would review the entry timing, risk sizing, and whether the strategy is overfitting the selected regime."
+            ),
+            "metrics": metrics,
+        }
+
+    def _handle_strategy_modification(self, message: str, user_id: str, state: dict[str, Any]) -> dict[str, Any]:
+        strategy_text = self._resolve_reference(message, state) or state.get("last_strategy_text")
+        if not strategy_text:
+            return {
+                "intent": "clarification_needed",
+                "message": "I don't have a recent strategy in this conversation yet. Tell me the strategy you want to change.",
+            }
+        updated_text = self._modify_strategy_text(strategy_text, message)
+        state["last_strategy_text"] = updated_text
+        state["last_intent"] = "strategy_modification"
+        return {
+            "intent": "strategy_modification",
+            "message": f"I updated the strategy to: {updated_text}. I can test that version next.",
+            "strategy_text": updated_text,
+        }
+
+    def _is_vague_strategy_request(self, text: str) -> bool:
+        lower = text.lower()
+        return (
+            "strategy" in lower and not re.search(r"\b(?:xauusd|eurusd|gbpusd|usdjpy|audusd|nzdusd|usdcad|usdchf|eurjpy|gbpjpy|audjpy|nas100|us30|btcusd|ethusd|gold)\b", lower)
+            and not re.search(r"\b(?:m1|m5|m15|m30|h1|h4|15m|5m|30m|1h|4h)\b", lower)
+        )
+
+    def _explain_indicator(self, text: str) -> str:
+        lower = text.lower()
+        if "rsi" in lower:
+            return "RSI measures the speed and magnitude of recent price changes. Readings below 30 often suggest oversold conditions, while readings above 70 often suggest overbought conditions."
+        if "macd" in lower:
+            return "MACD compares fast and slow moving averages to show momentum and trend changes. Crossovers are often used as directional signals."
+        if "ema" in lower:
+            return "The EMA gives more weight to recent prices than a simple average, making it more responsive to recent trend changes. A 50 or 200 EMA is common for trend filtering."
+        if "atr" in lower:
+            return "ATR measures average true range and is commonly used to estimate volatility and set stop-loss distance."
+        if "stochastic" in lower:
+            return "Stochastic compares the closing price to its recent range, and it is often used to spot momentum and potential reversal zones."
+        if "bollinger" in lower:
+            return "Bollinger Bands show a moving average with upper and lower bands based on volatility; price near the edges can signal exhaustion or expansion."
+        return "I can explain trading concepts like RSI, MACD, EMAs, ATR, and momentum indicators. Tell me which one you want to understand."
 
     def respond(self, message: str, user_id: str = "anonymous", progress_callback=None) -> dict[str, Any]:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("Message is required.")
         intent, entities = self.classifier.classify(message)
         profile = self.store.profile(user_id)
+        state = self._session(user_id)
         if not entities.get("name"):
             entities["name"] = profile.get("name")
         if intent == "greeting":
             name = entities.get("name")
             if name:
+                state["onboarding_state"] = "awaiting_offer_confirmation"
                 answer = f"Welcome {name}! Wanna know how I can help you?"
-                state = "awaiting_offer_confirmation"
+                state["current_topic"] = "greeting"
+                state["last_intent"] = intent
+                result = {"intent": intent, "message": answer, "profile": {"name": name}}
             else:
                 greeting = entities.get("greeting_word", "Hello")
+                state["onboarding_state"] = "awaiting_name"
                 answer = f"{greeting}, I am NEXAFUNDS AI. Who am I speaking with please?"
-                state = "awaiting_name"
-            result = {"intent": intent, "message": answer, "profile": {"name": name}}
-        elif intent == "affirmative" and profile.get("onboarding_state") == "awaiting_offer_confirmation":
+                state["current_topic"] = "greeting"
+                state["last_intent"] = intent
+                result = {"intent": intent, "message": answer, "profile": {"name": name}}
+        elif intent == "affirmative":
+            if profile.get("name") or state.get("onboarding_state") == "awaiting_offer_confirmation":
+                result = {
+                    "intent": "capabilities",
+                    "message": (
+                        "I can understand natural-language trading ideas, validate and backtest strategies "
+                        "on downloaded market data, compare indicator combinations, run walk-forward validation, "
+                        "show progress for multi-market searches, rank measured candidates, and prepare "
+                        "EA-ready strategy specifications. I will always distinguish historical evidence "
+                        "from guaranteed profitability. What would you like to build?"
+                    ),
+                }
+                state["current_topic"] = "capabilities"
+                state["last_intent"] = intent
+                state["onboarding_state"] = "active"
+            else:
+                result = {"intent": "affirmative", "message": "Thanks. I can help with strategy design, validation, and measured backtests."}
+                state["current_topic"] = "affirmative"
+                state["last_intent"] = intent
+        elif intent == "indicator_explanation":
+            result = {"intent": intent, "message": self._explain_indicator(message)}
+            state["current_topic"] = "indicator_explanation"
+            state["last_intent"] = intent
+        elif intent == "strategy_modification":
+            result = self._handle_strategy_modification(message, user_id, state)
+            state["current_topic"] = "strategy_modification"
+        elif intent == "backtest_request":
+            result = self._handle_backtest_request(message, user_id, state)
+            state["current_topic"] = "backtest_request"
+        elif intent == "backtest_analysis":
+            result = self._handle_backtest_analysis(message, user_id, state)
+            state["current_topic"] = "backtest_analysis"
+        elif intent == "clarification_needed":
             result = {
-                "intent": "capabilities",
-                "message": (
-                    "I can understand natural-language trading ideas, validate and backtest strategies "
-                    "on downloaded market data, compare indicator combinations, run walk-forward validation, "
-                    "show progress for multi-market searches, rank measured candidates, and prepare "
-                    "EA-ready strategy specifications. I will always distinguish historical evidence "
-                    "from guaranteed profitability. What would you like to build?"
-                ),
+                "intent": "clarification_needed",
+                "message": "What timeframe and entry/exit rules do you want me to use for that strategy?",
             }
-            state = "active"
+            state["current_topic"] = "clarification_needed"
+        elif intent == "strategy_creation":
+            if self._is_vague_strategy_request(message):
+                result = {
+                    "intent": "clarification_needed",
+                    "message": "What timeframe and entry/exit rules should I use for that gold strategy?",
+                }
+            else:
+                strategy_text = message
+                report = self.analysis_service.analyze(strategy_text)
+                state["last_strategy_text"] = strategy_text
+                state["last_strategy"] = report.get("strategy")
+                state["last_backtest"] = report
+                state["last_summary"] = report.get("summary")
+                state["last_intent"] = intent
+                if not report.get("success"):
+                    result = {"intent": "clarification_needed", "message": report.get("error") or "I need a clearer strategy before I can test it."}
+                else:
+                    result = {
+                        "intent": "strategy_creation",
+                        "message": f"I interpreted that as a strategy for {report.get('strategy', {}).get('symbol', 'the instrument')}. I can test it next.",
+                        "strategy": report.get("strategy"),
+                        "validation": report.get("validation"),
+                    }
+            state["current_topic"] = "strategy_creation"
         elif intent == "combination_search":
             result = self._combination_search(message, entities, progress_callback=progress_callback)
-            state = "active"
+            state["current_topic"] = "combination_search"
+            state["last_intent"] = intent
         elif intent == "strategy_analysis":
             result = {"intent": intent, "message": "Please provide a symbol, timeframe, entry rules, risk, and historical data path for a measured analysis."}
-            state = "active"
+            state["current_topic"] = "strategy_analysis"
+            state["last_intent"] = intent
         else:
-            result = {"intent": intent, "message": "I can remember your name and help with evidence-based strategy research. What would you like to explore?"}
-            state = profile.get("onboarding_state", "active")
+            subject = message.strip()
+            result = {"intent": intent, "message": "I can help with trading concepts, strategy design, and measured backtests. What would you like to explore?"}
+            if "gold" in subject.lower() or "xauusd" in subject.lower():
+                result["message"] = "I can help with gold and XAUUSD strategy questions. Tell me the timeframe and the exact setup you want to test."
+            state["current_topic"] = intent
+            state["last_intent"] = intent
         if entities.get("name") and not profile.get("name"):
-            state = "awaiting_offer_confirmation"
+            state["current_topic"] = "greeting"
             result = {
                 "intent": "greeting",
                 "message": f"Welcome {entities['name']}! Wanna know how I can help you?",
                 "profile": {"name": entities["name"]},
             }
-        self.store.save(user_id, "user", message, name=entities.get("name"), onboarding_state=state)
+        self.store.save(user_id, "user", message, name=entities.get("name"), onboarding_state=state.get("onboarding_state", profile.get("onboarding_state", "active")))
         self.store.save(user_id, "assistant", result["message"], intent=intent)
         return result
 
