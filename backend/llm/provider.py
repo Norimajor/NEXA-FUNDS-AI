@@ -24,4 +24,8 @@ def get_llm_provider() -> LLMProvider:
         from .openai_provider import OpenAIProvider
 
         return OpenAIProvider()
+    if provider_name in {"ollama", "local"}:
+        from .ollama_provider import OllamaProvider
+
+        return OllamaProvider()
     raise ValueError(f"Unsupported LLM_PROVIDER '{provider_name}'.")
