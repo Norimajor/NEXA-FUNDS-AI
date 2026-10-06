@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.engine.strategy_analysis.analysis_service import StrategyAnalysisService
+from backend.llm.provider import LLMProviderError, get_llm_provider
 
 
 class ConversationStore:
@@ -27,8 +28,14 @@ class ConversationStore:
         with self._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS user_profiles (user_id TEXT PRIMARY KEY, name TEXT, updated_at TEXT NOT NULL)")
             columns = {row[1] for row in db.execute("PRAGMA table_info(user_profiles)")}
-            if "onboarding_state" not in columns:
-                db.execute("ALTER TABLE user_profiles ADD COLUMN onboarding_state TEXT NOT NULL DEFAULT 'new'")
+            for column_name, default in {
+                "onboarding_state": "'new'",
+                "current_topic": "NULL",
+                "last_intent": "NULL",
+                "last_strategy_text": "NULL",
+            }.items():
+                if column_name not in columns:
+                    db.execute(f"ALTER TABLE user_profiles ADD COLUMN {column_name} TEXT DEFAULT {default}")
             db.execute("""CREATE TABLE IF NOT EXISTS conversation_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, role TEXT NOT NULL,
                 message_json TEXT NOT NULL, created_at TEXT NOT NULL)""")
@@ -44,26 +51,47 @@ class ConversationStore:
 
     def profile(self, user_id: str) -> dict[str, Any]:
         with self._connection() as db:
-            row = db.execute("SELECT name, onboarding_state FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
+            row = db.execute(
+                "SELECT name, onboarding_state, current_topic, last_intent, last_strategy_text FROM user_profiles WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
             messages = db.execute(
                 "SELECT role, message_json FROM conversation_messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
                 (user_id, self.max_messages),
             ).fetchall()
-        return {"name": row[0] if row else None, "onboarding_state": row[1] if row else "new", "messages": [
-            {"role": role, **json.loads(payload)} for role, payload in reversed(messages)
-        ]}
+        return {
+            "name": row[0] if row else None,
+            "onboarding_state": row[1] if row else "new",
+            "current_topic": row[2] if row else None,
+            "last_intent": row[3] if row else None,
+            "last_strategy_text": row[4] if row else None,
+            "messages": [
+                {"role": role, **json.loads(payload)} for role, payload in reversed(messages)
+            ],
+        }
 
     def save(self, user_id: str, role: str, message: str, **metadata: Any) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._connection() as db:
-            if metadata.get("name") or metadata.get("onboarding_state"):
+            if any(key in metadata for key in ("name", "onboarding_state", "current_topic", "last_intent", "last_strategy_text")):
                 db.execute(
-                    "INSERT INTO user_profiles(user_id,name,onboarding_state,updated_at) VALUES(?,?,?,?) "
+                    "INSERT INTO user_profiles(user_id,name,onboarding_state,current_topic,last_intent,last_strategy_text,updated_at) VALUES(?,?,?,?,?,?,?) "
                     "ON CONFLICT(user_id) DO UPDATE SET "
                     "name=COALESCE(excluded.name,user_profiles.name), "
                     "onboarding_state=COALESCE(excluded.onboarding_state,user_profiles.onboarding_state), "
+                    "current_topic=COALESCE(excluded.current_topic,user_profiles.current_topic), "
+                    "last_intent=COALESCE(excluded.last_intent,user_profiles.last_intent), "
+                    "last_strategy_text=COALESCE(excluded.last_strategy_text,user_profiles.last_strategy_text), "
                     "updated_at=excluded.updated_at",
-                    (user_id, metadata.get("name"), metadata.get("onboarding_state", "new"), now),
+                    (
+                        user_id,
+                        metadata.get("name"),
+                        metadata.get("onboarding_state", "new"),
+                        metadata.get("current_topic"),
+                        metadata.get("last_intent"),
+                        metadata.get("last_strategy_text"),
+                        now,
+                    ),
                 )
             db.execute("INSERT INTO conversation_messages(user_id,role,message_json,created_at) VALUES(?,?,?,?)",
                        (user_id, role, json.dumps({"message": message, **metadata}), now))
@@ -102,6 +130,12 @@ class IntentClassifier:
             greeting = re.search(r"\b(hello|hi|hey)\b", lower)
             entities["greeting_word"] = greeting.group(1).capitalize() if greeting else "Hello"
             return "greeting", entities
+        if "trading concepts" in lower or "trading concept" in lower or "learn trading" in lower:
+            return "trading_concepts", entities
+        if "strategy design" in lower or "design a strategy" in lower or "design strategy" in lower:
+            return "strategy_design", entities
+        if "measured backtests" in lower or "measured backtest" in lower or "backtesting" in lower or "run backtests" in lower:
+            return "backtesting", entities
         if re.search(r"\b(?:what\s+is|what\s+are|explain|describe|tell\s+me\s+about)\b", lower):
             if re.search(r"\b(?:rsi|macd|ema|adx|atr|bollinger|stochastic|cci|mfi|williams|vwap|ichimoku|supertrend|sar|supply|demand)\b", lower):
                 return "indicator_explanation", entities
@@ -225,6 +259,29 @@ class ConversationalAssistant:
             return text
         return text
 
+    def _run_strategy_analysis(self, strategy_text: str) -> dict[str, Any]:
+        try:
+            strategy = get_llm_provider().interpret_strategy(strategy_text)
+            return self.analysis_service.analyze(strategy_text, strategy=strategy)
+        except LLMProviderError as exc:
+            return {
+                "success": False,
+                "error": f"Strategy interpretation failed: {exc}",
+                "strategy": None,
+            }
+        except ValueError as exc:
+            return {
+                "success": False,
+                "error": f"Strategy interpretation failed: {exc}",
+                "strategy": None,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": f"Strategy interpretation failed: {exc}",
+                "strategy": None,
+            }
+
     def _handle_backtest_request(self, message: str, user_id: str, state: dict[str, Any]) -> dict[str, Any]:
         strategy_text = self._resolve_reference(message, state) or message
         if self._is_vague_strategy_request(strategy_text):
@@ -233,7 +290,7 @@ class ConversationalAssistant:
                 "message": "I need the symbol, timeframe, and entry rules before I can backtest it. If you want, say: 'XAUUSD M15 long when RSI is below 30.'",
             }
         try:
-            report = self.analysis_service.analyze(strategy_text)
+            report = self._run_strategy_analysis(strategy_text)
         except Exception as exc:
             return {
                 "intent": "clarification_needed",
@@ -325,15 +382,81 @@ class ConversationalAssistant:
             return "Bollinger Bands show a moving average with upper and lower bands based on volatility; price near the edges can signal exhaustion or expansion."
         return "I can explain trading concepts like RSI, MACD, EMAs, ATR, and momentum indicators. Tell me which one you want to understand."
 
+    def _topic_response(self, intent: str, message: str, state: dict[str, Any]) -> dict[str, Any] | None:
+        lower = message.strip().lower()
+        if intent == "trading_concepts":
+            state["onboarding_state"] = "active"
+            return {
+                "intent": "trading_concepts",
+                "message": (
+                    "Absolutely. We can work through trading concepts such as RSI, EMA, MACD, ATR, trend structure, "
+                    "entries, exits, risk management, and how those ideas can be tested on real market data. "
+                    "What would you like to start with?"
+                ),
+            }
+        if intent == "strategy_design":
+            state["onboarding_state"] = "active"
+            symbol = None
+            timeframe = None
+            symbol_match = re.search(r"\b(?:xauusd|eurusd|gbpusd|usdjpy|audusd|nzdusd|usdcad|usdchf|eurjpy|gbpjpy|audjpy|nas100|us30|btcusd|ethusd|gold)\b", lower)
+            if symbol_match:
+                symbol = symbol_match.group(0).upper()
+            timeframe_match = re.search(r"\b(?:m1|m5|m15|m30|h1|h4|d1|w1|mn1)\b", lower)
+            if timeframe_match:
+                timeframe = timeframe_match.group(0).upper()
+            if symbol and timeframe:
+                return {
+                    "intent": "strategy_design",
+                    "message": (
+                        f"Absolutely. We can design a strategy for {symbol} on the {timeframe} timeframe. "
+                        "Tell me the entry, exit, and risk rules you want to test, and I’ll shape the structure around them."
+                    ),
+                }
+            return {
+                "intent": "strategy_design",
+                "message": (
+                    "Absolutely. We can design a strategy together. Tell me the instrument, timeframe, and the rules "
+                    "you want to build around, and I’ll shape the structure from there."
+                ),
+            }
+        if intent == "backtesting":
+            state["onboarding_state"] = "active"
+            return {
+                "intent": "backtesting",
+                "message": (
+                    "Absolutely. I can test strategies against the available historical market data. Share the strategy idea, "
+                    "instrument, and timeframe, and I’ll help turn it into a measured backtest."
+                ),
+            }
+        return None
+
     def respond(self, message: str, user_id: str = "anonymous", progress_callback=None) -> dict[str, Any]:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("Message is required.")
-        intent, entities = self.classifier.classify(message)
         profile = self.store.profile(user_id)
         state = self._session(user_id)
+        state["current_topic"] = state.get("current_topic") or profile.get("current_topic")
+        state["last_intent"] = state.get("last_intent") or profile.get("last_intent")
+        state["last_strategy_text"] = state.get("last_strategy_text") or profile.get("last_strategy_text")
+        state["onboarding_state"] = state.get("onboarding_state") or profile.get("onboarding_state", "active")
+        intent, entities = self.classifier.classify(message)
         if not entities.get("name"):
             entities["name"] = profile.get("name")
-        if intent == "greeting":
+        lower = message.strip().lower()
+        current_topic = state.get("current_topic")
+        if current_topic == "strategy_design" and re.search(r"\b(?:xauusd|eurusd|gbpusd|usdjpy|audusd|nzdusd|usdcad|usdchf|eurjpy|gbpjpy|audjpy|nas100|us30|btcusd|ethusd|gold)\b", lower):
+            intent = "strategy_design"
+        if current_topic == "backtesting" and ("test" in lower or "backtest" in lower or "rsi" in lower or "gold" in lower or "xauusd" in lower):
+            intent = "backtest_request"
+        if intent in {"trading_concepts", "strategy_design", "backtesting"}:
+            state["onboarding_state"] = "active"
+        topic_response = self._topic_response(intent, message, state)
+        if topic_response is not None:
+            result = topic_response
+            state["current_topic"] = intent
+            state["last_intent"] = intent
+            state["onboarding_state"] = "active"
+        elif intent == "greeting":
             name = entities.get("name")
             if name:
                 state["onboarding_state"] = "awaiting_offer_confirmation"
@@ -394,7 +517,7 @@ class ConversationalAssistant:
                 }
             else:
                 strategy_text = message
-                report = self.analysis_service.analyze(strategy_text)
+                report = self._run_strategy_analysis(strategy_text)
                 state["last_strategy_text"] = strategy_text
                 state["last_strategy"] = report.get("strategy")
                 state["last_backtest"] = report
@@ -418,13 +541,15 @@ class ConversationalAssistant:
             result = {"intent": intent, "message": "Please provide a symbol, timeframe, entry rules, risk, and historical data path for a measured analysis."}
             state["current_topic"] = "strategy_analysis"
             state["last_intent"] = intent
+            state["onboarding_state"] = "active"
         else:
             subject = message.strip()
-            result = {"intent": intent, "message": "I can help with trading concepts, strategy design, and measured backtests. What would you like to explore?"}
+            result = {"intent": intent, "message": "I can help with trading concepts, strategy design, or measured backtests. Tell me which area you want to focus on."}
             if "gold" in subject.lower() or "xauusd" in subject.lower():
                 result["message"] = "I can help with gold and XAUUSD strategy questions. Tell me the timeframe and the exact setup you want to test."
             state["current_topic"] = intent
             state["last_intent"] = intent
+            state["onboarding_state"] = "active"
         if entities.get("name") and not profile.get("name"):
             state["current_topic"] = "greeting"
             result = {
@@ -432,7 +557,16 @@ class ConversationalAssistant:
                 "message": f"Welcome {entities['name']}! Wanna know how I can help you?",
                 "profile": {"name": entities["name"]},
             }
-        self.store.save(user_id, "user", message, name=entities.get("name"), onboarding_state=state.get("onboarding_state", profile.get("onboarding_state", "active")))
+        self.store.save(
+            user_id,
+            "user",
+            message,
+            name=entities.get("name"),
+            onboarding_state=state.get("onboarding_state", profile.get("onboarding_state", "active")),
+            current_topic=state.get("current_topic"),
+            last_intent=state.get("last_intent"),
+            last_strategy_text=state.get("last_strategy_text"),
+        )
         self.store.save(user_id, "assistant", result["message"], intent=intent)
         return result
 

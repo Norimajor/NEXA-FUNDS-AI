@@ -1,0 +1,14 @@
+{
+  "grid_interval_mae_atr": {
+    "buy": 0.4651505344982951,
+    "sell": 0.42544591356910216
+  },
+  "samples": 200,
+  "chronological_test_samples": 40,
+  "swing_exit_mae_atr": {
+    "buy_stop": 0.9919040279976196,
+    "buy_target": 1.0092216164007752,
+    "sell_stop": 1.0092216164007752,
+    "sell_target": 0.9919040279976196
+  }
+}

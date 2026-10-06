@@ -30,11 +30,13 @@ class MTFDataEngine:
     def __init__(
         self,
         data_directory: str = "data",
+        allow_fallback: bool = True,
     ):
 
         self.data_directory = Path(
             data_directory
         )
+        self.allow_fallback = allow_fallback
 
     # ========================================================
     # FILE
@@ -58,7 +60,9 @@ class MTFDataEngine:
             self.data_directory
             / filename
         )
-        if not path.exists():
+        if path.exists():
+            return path
+        if self.allow_fallback:
             alternate = Path(__file__).resolve().parents[2] / "data" / f"{symbol.replace('.', '_')}_m_{timeframe}.csv"
             if alternate.exists():
                 return alternate

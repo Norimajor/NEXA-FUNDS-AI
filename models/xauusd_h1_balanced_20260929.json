@@ -1,0 +1,27 @@
+{
+  "accuracy": 0.29190751445086704,
+  "balanced_accuracy": 0.18102072023400395,
+  "roc_auc": 0.705873071937133,
+  "classes": [
+    "breakout_buy",
+    "breakout_sell",
+    "continuation_buy",
+    "continuation_sell",
+    "failed_breakout_buy",
+    "failed_breakout_sell",
+    "no_edge",
+    "reversal_buy",
+    "reversal_sell"
+  ],
+  "class_recall": {
+    "breakout_buy": 0.0,
+    "breakout_sell": 0.0,
+    "continuation_buy": 0.43661971830985913,
+    "continuation_sell": 0.22,
+    "failed_breakout_buy": 0.0,
+    "failed_breakout_sell": 0.05555555555555555,
+    "no_edge": 0.4791666666666667,
+    "reversal_buy": 0.19230769230769232,
+    "reversal_sell": 0.06451612903225806
+  }
+}

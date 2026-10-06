@@ -119,6 +119,37 @@ class TestAnalyzeLLMIntegration(unittest.TestCase):
         self.assertEqual(body["intent"], "web_research")
         self.assertIn("Federal Reserve", body["research"]["sources"][0]["source"])
 
+    def test_chat_routes_strategy_requests_through_ollama_provider(self):
+        with patch.dict(os.environ, {"LLM_PROVIDER": "ollama"}, clear=False):
+            provider = Mock()
+            provider.interpret_strategy.return_value = StrategyDefinition(
+                name="Ollama strategy",
+                symbol="XAUUSD",
+                timeframe="M15",
+                direction="long",
+                entry_conditions=[StrategyCondition(indicator="RSI", operator="<", value=30.0, period=14, side="buy", timeframe="M15", entry_semantics="condition")],
+                exit_conditions=[],
+                filters=[],
+            )
+            with patch("backend.conversation_assistant.get_llm_provider", return_value=provider) as mocked_factory:
+                with patch("backend.engine.strategy_analysis.analysis_service.StrategyAnalysisService.analyze", return_value={
+                    "success": True,
+                    "strategy": {"symbol": "XAUUSD", "timeframe": "M15", "direction": "long"},
+                    "backtest": {"status": "completed", "trades": 12, "net_return": 1.4},
+                    "summary": "Deterministic backtest executed.",
+                    "validation": {"valid": True},
+                }) as mocked_analyze:
+                    response = self.client.post(
+                        "/chat",
+                        json={"message": "Backtest XAUUSD M15 when RSI is below 30 and go long.", "user_id": "u1"},
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        mocked_factory.assert_called_once()
+        provider.interpret_strategy.assert_called_once()
+        mocked_analyze.assert_called_once()
+        self.assertIn("message", response.json())
+
     def test_chat_avoids_web_search_for_backtest_requests(self):
         with patch("backend.api.web_search", create=True) as mocked_search:
             response = self.client.post(

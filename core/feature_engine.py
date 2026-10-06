@@ -1,0 +1,10 @@
+import numpy as np
+import pandas as pd
+FEATURE_NAMES=['ema_distance_20_50','ema_distance_50_200','price_distance_ema50','rsi','macd_hist_atr','atr_pct','volume_ratio','return_5','return_20','body_ratio','channel_score','channel_slope_atr','channel_location','channel_bias_buy','channel_bias_sell','demand_distance_atr','supply_distance_atr','demand_strength','supply_strength','structure_bull','structure_bear']
+class FeatureEngine:
+    def build(self,df,channel,zones,structure):
+        r=df.iloc[-1]; atr=max(float(r.atr_14),1e-12); price=float(r.close)
+        d=min((z for z in zones if z['type']=='demand'),key=lambda z:abs(z['mid']-price),default=None)
+        s=min((z for z in zones if z['type']=='supply'),key=lambda z:abs(z['mid']-price),default=None)
+        return {'ema_distance_20_50':float((r.ema_20-r.ema_50)/atr),'ema_distance_50_200':float((r.ema_50-r.ema_200)/atr) if pd.notna(r.ema_200) else 0,'price_distance_ema50':float((price-r.ema_50)/atr),'rsi':float(r.rsi_14)/100,'macd_hist_atr':float(r.macd_hist)/atr,'atr_pct':float(atr/price),'volume_ratio':float(np.clip(r.volume_ratio,0,5)),'return_5':float(r.return_5),'return_20':float(r.return_20),'body_ratio':float(np.clip(r.body_ratio,0,1)),'channel_score':float(channel['score']/100) if channel else 0,'channel_slope_atr':float(channel['slope_per_candle']/atr) if channel else 0,'channel_location':{'above':1.2,'upper_half':.5,'lower_half':-.5,'below':-1.2}.get(channel['location'],0) if channel else 0,'channel_bias_buy':1.0 if channel and channel['bias']=='BUY' else 0,'channel_bias_sell':1.0 if channel and channel['bias']=='SELL' else 0,'demand_distance_atr':float(abs(price-d['mid'])/atr) if d else 9,'supply_distance_atr':float(abs(price-s['mid'])/atr) if s else 9,'demand_strength':float(d['strength']) if d else 0,'supply_strength':float(s['strength']) if s else 0,'structure_bull':1.0 if structure['structure']=='BULLISH' else 0,'structure_bear':1.0 if structure['structure']=='BEARISH' else 0}
+    def vector(self,features): return np.array([float(features.get(x,0)) for x in FEATURE_NAMES],dtype=float)

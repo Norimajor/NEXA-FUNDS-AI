@@ -130,6 +130,53 @@ class TestConversationAssistant(unittest.TestCase):
             self.assertEqual(service.analyze.call_count, 2)
             self.assertIn("XAUUSD", result["message"])
 
+    def test_topic_selections_are_not_reused_as_generic_onboarding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            assistant = ConversationalAssistant(store=ConversationStore(os.path.join(directory, "topic_selection.sqlite3")))
+            onboarding = assistant.respond("hello", "u1")
+            self.assertIn("Who am I speaking with", onboarding["message"])
+
+            trading = assistant.respond("trading concepts", "u1")
+            self.assertNotEqual(trading["message"], "I can help with trading concepts, strategy design, and measured backtests. What would you like to explore?")
+            self.assertEqual(trading["intent"], "trading_concepts")
+            self.assertIn("RSI", trading["message"])
+
+            strategy = assistant.respond("strategy design", "u1")
+            self.assertNotEqual(strategy["message"], "I can help with trading concepts, strategy design, and measured backtests. What would you like to explore?")
+            self.assertEqual(strategy["intent"], "strategy_design")
+            self.assertIn("instrument", strategy["message"].lower())
+
+            backtests = assistant.respond("measured backtests", "u1")
+            self.assertNotEqual(backtests["message"], "I can help with trading concepts, strategy design, and measured backtests. What would you like to explore?")
+            self.assertEqual(backtests["intent"], "backtesting")
+            self.assertIn("historical market data", backtests["message"].lower())
+
+    def test_strategy_design_context_persists_after_topic_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            assistant = ConversationalAssistant(store=ConversationStore(os.path.join(directory, "context_persistence.sqlite3")))
+            assistant.respond("strategy design", "u1")
+            follow_up = assistant.respond("for XAUUSD M15", "u1")
+            self.assertEqual(follow_up["intent"], "strategy_design")
+            self.assertIn("XAUUSD", follow_up["message"].upper())
+
+    def test_backtesting_selection_routes_to_strategy_flow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            assistant = ConversationalAssistant(store=ConversationStore(os.path.join(directory, "backtest_selection.sqlite3")))
+            assistant.respond("measured backtests", "u1")
+            follow_up = assistant.respond("test RSI below 30 on gold", "u1")
+            self.assertIn(follow_up["intent"], {"backtest_request", "strategy_creation", "clarification_needed"})
+            self.assertNotEqual(follow_up["message"], "I can help with trading concepts, strategy design, and measured backtests. What would you like to explore?")
+
+    def test_after_onboardingordinary_questions_are_not_reused_as_onboarding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            assistant = ConversationalAssistant(store=ConversationStore(os.path.join(directory, "ordinary_questions.sqlite3")))
+            assistant.respond("hello", "u1")
+            assistant.respond("you're speaking with Obed", "u1")
+            explain = assistant.respond("Explain RSI.", "u1")
+            self.assertEqual(explain["intent"], "indicator_explanation")
+            self.assertIn("RSI", explain["message"])
+            self.assertNotEqual(explain["message"], "I can help with trading concepts, strategy design, and measured backtests. What would you like to explore?")
+
     def test_strategy_modification_and_backtest_analysis_use_recent_context(self):
         with tempfile.TemporaryDirectory() as directory:
             service = Mock()

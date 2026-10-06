@@ -1,0 +1,16 @@
+{
+  "accuracy": 0.3156993339676499,
+  "balanced_accuracy": 0.16103845870097344,
+  "roc_auc": 0.699034807161806,
+  "classes": [
+    "breakout_buy",
+    "breakout_sell",
+    "continuation_buy",
+    "continuation_sell",
+    "failed_breakout_buy",
+    "failed_breakout_sell",
+    "no_edge",
+    "reversal_buy",
+    "reversal_sell"
+  ]
+}

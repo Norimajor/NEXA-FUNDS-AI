@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import math
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -203,7 +204,7 @@ class TestStrategyAnalysis(unittest.TestCase):
 
     def test_api_analyze_preserves_structured_response_contract(self):
         client = TestClient(app)
-        with unittest.mock.patch("backend.api.get_llm_provider", return_value=MockLLMProvider()):
+        with mock.patch("backend.api.get_llm_provider", return_value=MockLLMProvider()):
             response = client.post("/analyze", json={"prompt": "Buy EURUSD when RSI is below 30."})
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -217,7 +218,7 @@ class TestStrategyAnalysis(unittest.TestCase):
 
     def test_api_analyze_returns_cors_header_for_production_origin(self):
         client = TestClient(app)
-        with unittest.mock.patch("backend.api.get_llm_provider", return_value=MockLLMProvider()):
+        with mock.patch("backend.api.get_llm_provider", return_value=MockLLMProvider()):
             response = client.post(
                 "/analyze",
                 json={"prompt": "Buy EURUSD when RSI is below 30."},

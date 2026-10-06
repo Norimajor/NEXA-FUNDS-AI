@@ -25,7 +25,10 @@ class StrategyAnalysisService:
         self.data_directory = Path(configured_data_directory) if configured_data_directory else default_data_directory
         self.parser = StrategyParser()
         self.validator = StrategyValidator()
-        self.data_engine = MTFDataEngine(data_directory=str(self.data_directory))
+        self.data_engine = MTFDataEngine(
+            data_directory=str(self.data_directory),
+            allow_fallback=not data_directory and not os.getenv("NEXA_FUNDS_DATA_DIR"),
+        )
         self.indicator_engine = MTFIndicatorEngine(data_directory=str(self.data_directory))
 
     def analyze(self, prompt: str, strategy: StrategyDefinition | None = None) -> dict[str, Any]:
