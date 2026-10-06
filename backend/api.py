@@ -11,8 +11,10 @@ from backend.llm.provider import LLMProviderError, get_llm_provider
 from backend.conversation_assistant import ConversationalAssistant
 from backend.backtest_jobs import backtest_jobs
 from backend.web_search import WebSearchError, needs_web_research, web_search
+from api.ml_consensus import ml_router as ml_consensus_router
 
 app = FastAPI(title="NEXA FUNDS AI")
+app.include_router(ml_consensus_router)
 
 frontend_origin = os.getenv(
     "NEXAFUNDS_FRONTEND_ORIGIN",

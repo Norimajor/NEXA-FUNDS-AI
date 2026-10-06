@@ -218,7 +218,7 @@ class SignalApiTests(unittest.TestCase):
         }
 
         with (
-            patch("api.web_server.INGEST_API_KEY", ""),
+            patch("api.ml_consensus.INGEST_API_KEY", ""),
             patch.object(web_server.h1_engine, "analyze", return_value=h1_result),
             patch.object(web_server.m15_engine, "analyze", return_value=m15_result),
         ):
@@ -255,7 +255,7 @@ class SignalApiTests(unittest.TestCase):
         }
 
         with (
-            patch("api.web_server.INGEST_API_KEY", ""),
+            patch("api.ml_consensus.INGEST_API_KEY", ""),
             patch.object(web_server.h1_engine, "analyze", return_value=h1_result),
             patch.object(web_server.m15_engine, "analyze", return_value=m15_result),
         ):
@@ -294,7 +294,7 @@ class SignalApiTests(unittest.TestCase):
         payload = {"symbol": "XAUUSD", "h1_candles": candles, "m15_candles": candles}
 
         with (
-            patch("api.web_server.INGEST_API_KEY", ""),
+            patch("api.ml_consensus.INGEST_API_KEY", ""),
             patch.object(web_server.h1_engine, "analyze", return_value=h1_result),
             patch.object(web_server.m15_engine, "analyze", return_value=m15_result),
         ):
@@ -339,7 +339,7 @@ class SignalApiTests(unittest.TestCase):
         payload = {"symbol": "EURUSD", "h1_candles": candles, "m15_candles": candles}
 
         with (
-            patch("api.web_server.INGEST_API_KEY", ""),
+            patch("api.ml_consensus.INGEST_API_KEY", ""),
             patch.object(web_server.h1_engine, "analyze", return_value=h1_result),
             patch.object(web_server.m15_engine, "analyze", return_value=m15_result),
         ):
