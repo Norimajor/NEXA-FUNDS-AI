@@ -79,16 +79,20 @@ class MarketDataProcessor:
         df["upper_wick"] = high - df[["open", "close"]].max(axis=1)
         df["lower_wick"] = df[["open", "close"]].min(axis=1) - low
 
-        # Confirmed fractal pivots. A pivot is only known after right_bars close.
+        # Timestamp each fractal pivot at the candle where it becomes knowable.
         left = right = 2
-        df["swing_high"] = (
+        swing_high = (
             high.eq(high.rolling(left + right + 1, center=True).max())
             & high.shift(left).lt(high)
             & high.shift(-right).lt(high)
         )
-        df["swing_low"] = (
+        swing_low = (
             low.eq(low.rolling(left + right + 1, center=True).min())
             & low.shift(left).gt(low)
             & low.shift(-right).gt(low)
         )
+        df["swing_high"] = swing_high.shift(right, fill_value=False).astype(bool)
+        df["swing_low"] = swing_low.shift(right, fill_value=False).astype(bool)
+        df["swing_high_price"] = high.where(swing_high).shift(right)
+        df["swing_low_price"] = low.where(swing_low).shift(right)
         return df

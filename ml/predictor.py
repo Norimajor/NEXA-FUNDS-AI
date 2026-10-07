@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 
 import joblib
@@ -19,6 +20,9 @@ class ModelPredictor:
                 interval_bundle = joblib.load(self.interval_path)
                 self.bundle['grid_interval_models'] = interval_bundle.get('grid_interval_models', {})
                 self.bundle['swing_exit_models'] = interval_bundle.get('swing_exit_models', {})
+                self.bundle['interval_feature_names'] = interval_bundle.get(
+                    'feature_names', self.bundle.get('feature_names')
+                )
 
     @property
     def ready(self):
@@ -56,7 +60,26 @@ class ModelPredictor:
         if not self.bundle:
             return empty_result
 
-        arr = np.asarray(X, dtype=float).reshape(1, -1)
+        feature_names = self.bundle.get('feature_names')
+        if isinstance(features, Mapping) and feature_names:
+            arr = np.asarray(
+                [[float(features.get(name, 0.0)) for name in feature_names]],
+                dtype=float,
+            )
+        else:
+            arr = np.asarray(X, dtype=float).reshape(1, -1)
+            if feature_names and arr.shape[1] != len(feature_names):
+                raise ValueError(
+                    f'Model expects {len(feature_names)} features, received {arr.shape[1]}.'
+                )
+        interval_feature_names = self.bundle.get('interval_feature_names', feature_names)
+        if isinstance(features, Mapping) and interval_feature_names:
+            interval_arr = np.asarray(
+                [[float(features.get(name, 0.0)) for name in interval_feature_names]],
+                dtype=float,
+            )
+        else:
+            interval_arr = arr
         model = self.bundle['model']
         if not hasattr(model, 'predict_proba'):
             return empty_result
@@ -136,7 +159,7 @@ class ModelPredictor:
         for direction in ('buy', 'sell'):
             interval_model = interval_models.get(direction)
             if interval_model is not None:
-                interval = float(interval_model.predict(arr)[0])
+                interval = float(interval_model.predict(interval_arr)[0])
                 result[f'grid_interval_{direction}_atr'] = float(np.clip(interval, 0.1, 5.0))
         exit_models = self.bundle.get('swing_exit_models', {})
         exit_keys = {
@@ -148,7 +171,7 @@ class ModelPredictor:
         for name, result_key in exit_keys.items():
             exit_model = exit_models.get(name)
             if exit_model is not None:
-                distance = float(exit_model.predict(arr)[0])
+                distance = float(exit_model.predict(interval_arr)[0])
                 result[result_key] = float(np.clip(distance, 0.1, 5.0))
         for class_name, probability in class_probabilities.items():
             if class_name.endswith('_buy') or class_name.endswith('_sell'):

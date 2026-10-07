@@ -6,7 +6,7 @@ from ml.model_metrics import weighted_ovr_roc_auc
 
 
 class WalkForwardValidator:
-    def validate(self, X, y, initial_train=250, test_size=50, step=50, max_windows=5):
+    def validate(self, X, y, initial_train=250, test_size=50, step=50, max_windows=5, purge=12):
         X, y = np.asarray(X, float), np.asarray(y)
         out = []
         end = max(initial_train, len(X) // 2)
@@ -17,6 +17,9 @@ class WalkForwardValidator:
         boundaries = np.linspace(end, len(X), window_count + 1, dtype=int)
         for index in range(window_count):
             test_start, test_end = boundaries[index:index + 2]
+            train_end = test_start - purge
+            if train_end <= 0:
+                raise ValueError('Insufficient training history after applying the validation purge.')
             m = HistGradientBoostingClassifier(
                 learning_rate=.04,
                 max_iter=300,
@@ -26,12 +29,13 @@ class WalkForwardValidator:
                 class_weight='balanced',
                 random_state=42,
             )
-            m.fit(X[:test_start], y[:test_start])
+            m.fit(X[:train_end], y[:train_end])
             prob = m.predict_proba(X[test_start:test_end])
             yt = y[test_start:test_end]
             pred = np.asarray(m.classes_)[prob.argmax(axis=1)]
             item = {
-                'train_end': int(test_start),
+                'train_end': int(train_end),
+                'test_start': int(test_start),
                 'test_end': int(test_end),
                 'balanced_accuracy': float(balanced_accuracy_score(yt, pred)) if len(np.unique(yt)) > 1 else 0.5,
             }

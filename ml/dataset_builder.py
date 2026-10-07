@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Iterable
-
 import numpy as np
 import pandas as pd
 
@@ -12,25 +10,20 @@ from core.market_structure import MarketStructureAnalyzer
 from core.supply_demand_detector import SupplyDemandDetector
 
 
-CLASS_NAMES = [
-    "reversal_buy",
-    "reversal_sell",
-    "continuation_buy",
-    "continuation_sell",
-    "breakout_buy",
-    "breakout_sell",
-    "failed_breakout_buy",
-    "failed_breakout_sell",
-    "no_edge",
-]
-
-
 class DatasetBuilder:
     """Build leakage-resistant labelled examples from historical OHLCV."""
 
-    def __init__(self, horizon=12, stop_atr=1.0, target_atr=1.5, grid_target_distance=None):
+    def __init__(
+        self,
+        horizon=12,
+        stop_atr=1.0,
+        target_atr=1.5,
+        grid_target_distance=None,
+        include_context_detectors=True,
+    ):
         self.horizon, self.stop_atr, self.target_atr = horizon, stop_atr, target_atr
         self.grid_target_distance = grid_target_distance
+        self.include_context_detectors = include_context_detectors
         self.channels, self.zones = ChannelDetector(), SupplyDemandDetector()
         self.structure, self.features = MarketStructureAnalyzer(), FeatureEngine()
         self.processor = MarketDataProcessor()
@@ -58,15 +51,38 @@ class DatasetBuilder:
         required = {"timestamp", "open", "high", "low", "close", "volume"}
         if not required.issubset(candles.columns):
             raise ValueError("Candles must include OHLCV data.")
-        if "swing_high" not in candles.columns or "atr_14" not in candles.columns:
+        if (
+            "swing_high" not in candles.columns
+            or "swing_high_price" not in candles.columns
+            or "swing_low_price" not in candles.columns
+            or "atr_14" not in candles.columns
+        ):
             candles = self.processor.prepare(candles)
         return candles
+
+    @staticmethod
+    def _first_barrier(future: pd.DataFrame, entry: float, atr: float, direction: str, stop_atr: float, target_atr: float) -> str:
+        if atr <= 0:
+            return "none"
+        target = entry + target_atr * atr if direction == "BUY" else entry - target_atr * atr
+        stop = entry - stop_atr * atr if direction == "BUY" else entry + stop_atr * atr
+        for candle in future.itertuples():
+            target_hit = float(candle.high) >= target if direction == "BUY" else float(candle.low) <= target
+            stop_hit = float(candle.low) <= stop if direction == "BUY" else float(candle.high) >= stop
+            if target_hit and stop_hit:
+                return "ambiguous"
+            if target_hit:
+                return "target"
+            if stop_hit:
+                return "stop"
+        return "none"
 
     def _future_context(self, hist: pd.DataFrame, future: pd.DataFrame, atr: float, entry: float):
         ref_high = hist["high"].iloc[-self.horizon :].max() if len(hist) >= self.horizon else hist["high"].max()
         ref_low = hist["low"].iloc[-self.horizon :].min() if len(hist) >= self.horizon else hist["low"].min()
-        recent_close = hist["close"].iloc[-max(5, self.horizon):]
-        trend_bias = 1.0 if recent_close.iloc[-1] > recent_close.iloc[0] else -1.0 if recent_close.iloc[-1] < recent_close.iloc[0] else 0.0
+        recent_close = hist["close"].iloc[-min(20, len(hist)):]
+        trend_move_atr = float((recent_close.iloc[-1] - recent_close.iloc[0]) / max(atr, 1e-8))
+        trend_bias = 1.0 if trend_move_atr >= 0.5 else -1.0 if trend_move_atr <= -0.5 else 0.0
         up_move = float(future["high"].max() - entry)
         down_move = float(entry - future["low"].min())
         future_return = float((future["close"].iloc[-1] - entry) / max(atr, 1e-8))
@@ -83,13 +99,18 @@ class DatasetBuilder:
         failed_up = bool(future["high"].max() >= ref_high + self.stop_atr * atr and future["close"].iloc[-1] < ref_high + 0.25 * max(atr, 1e-8))
         failed_down = bool(future["low"].min() <= ref_low - self.stop_atr * atr and future["close"].iloc[-1] > ref_low - 0.25 * max(atr, 1e-8))
 
-        reversal_up = bool(trend_bias < 0 and future_return > self.target_atr)
-        reversal_down = bool(trend_bias > 0 and future_return < -self.target_atr)
-        continuation_up = bool(trend_bias > 0 and future_return > self.stop_atr)
-        continuation_down = bool(trend_bias < 0 and future_return < -self.stop_atr)
+        buy_barrier = self._first_barrier(future, entry, atr, "BUY", self.stop_atr, self.target_atr)
+        sell_barrier = self._first_barrier(future, entry, atr, "SELL", self.stop_atr, self.target_atr)
+        reversal_up = bool(trend_bias < 0 and buy_barrier == "target")
+        reversal_down = bool(trend_bias > 0 and sell_barrier == "target")
+        continuation_up = bool(trend_bias > 0 and buy_barrier == "target")
+        continuation_down = bool(trend_bias < 0 and sell_barrier == "target")
 
         return {
             "trend_bias": trend_bias,
+            "trend_move_atr": trend_move_atr,
+            "buy_barrier": buy_barrier,
+            "sell_barrier": sell_barrier,
             "up_move_atr": up_move / max(atr, 1e-8),
             "down_move_atr": down_move / max(atr, 1e-8),
             "future_return": future_return,
@@ -111,7 +132,9 @@ class DatasetBuilder:
             "swing_target_sell_atr": swing_target_sell_atr,
         }
 
-    def _label_from_context(self, context: dict[str, float | bool]) -> tuple[int, str, str]:
+    def _label_from_context(self, context: dict[str, float | bool | str]) -> tuple[int, str, str]:
+        if context.get("buy_barrier") == "ambiguous" or context.get("sell_barrier") == "ambiguous":
+            return 8, "no_edge", "NONE"
         if context["reversal_up"]:
             return 0, "reversal_buy", "BUY"
         if context["reversal_down"]:
@@ -145,9 +168,9 @@ class DatasetBuilder:
         )
         for i in range(min_index, len(df) - self.horizon, sample_stride):
             hist = df.iloc[max(0, i + 1 - history_size) : i + 1]
-            channel = self.channels.detect(hist)
+            channel = self.channels.detect(hist) if self.include_context_detectors else []
             channel = channel[0] if channel else None
-            zones = self.zones.detect(hist)
+            zones = self.zones.detect(hist) if self.include_context_detectors else []
             structure = self.structure.analyze(hist)
             f = self.features.build(hist, channel, zones, structure)
             atr = float(hist.iloc[-1].get("atr_14", 0.0) or 0.0)
@@ -193,65 +216,5 @@ class DatasetBuilder:
             rows.append(row)
 
         if not rows:
-            # Keep the dataset builder usable for short or synthetic histories by
-            # emitting a fallback label set instead of aborting. This preserves the
-            # no-look-ahead labeling contract while still allowing a training run.
-            fallback = []
-            for i in range(min_index, len(df) - self.horizon, sample_stride):
-                hist = df.iloc[max(0, i + 1 - history_size) : i + 1]
-                channel = self.channels.detect(hist)
-                channel = channel[0] if channel else None
-                zones = self.zones.detect(hist)
-                structure = self.structure.analyze(hist)
-                f = self.features.build(hist, channel, zones, structure)
-                atr = float(hist.iloc[-1].get("atr_14", 0.0) or 0.0)
-                if atr <= 0:
-                    continue
-                entry = float(hist.iloc[-1].close)
-                future = df.iloc[i + 1 : i + 1 + self.horizon]
-                if future.empty:
-                    continue
-                future_return = float((future["close"].iloc[-1] - entry) / max(atr, 1e-8))
-                if abs(future_return) < self.stop_atr:
-                    label_name, direction = "no_edge", "NONE"
-                elif future_return > 0:
-                    label_name, direction = "continuation_buy", "BUY"
-                else:
-                    label_name, direction = "reversal_sell", "SELL"
-                setup_type = label_name.rsplit("_", 1)[0] if direction != "NONE" else "no_edge"
-                label_index = CLASS_NAMES.index(label_name)
-                row = {
-                    "timestamp": hist.iloc[-1].timestamp,
-                    "entry": entry,
-                    "label": int(label_index),
-                    "label_name": label_name,
-                    "setup_type": setup_type,
-                    "direction": direction,
-                }
-                for key in FEATURE_NAMES:
-                    row[key] = float(f.get(key, 0.0))
-                row.update({
-                    "probability_reversal": float(setup_type == "reversal"),
-                    "probability_continuation": float(setup_type == "continuation"),
-                    "probability_breakout": 0.0,
-                    "probability_failed_breakout": 0.0,
-                    "probability_no_edge": float(setup_type == "no_edge"),
-                    "probability_long": float(direction == "BUY"),
-                    "probability_short": float(direction == "SELL"),
-                    "probability_flat": float(direction == "NONE"),
-                    "future_return": future_return,
-                    "trend_bias": float((hist["close"].iloc[-1] - hist["close"].iloc[0]) / max(atr, 1e-8)),
-                    "up_move_atr": float((future["high"].max() - entry) / max(atr, 1e-8)),
-                    "down_move_atr": float((entry - future["low"].min()) / max(atr, 1e-8)),
-                    "grid_interval_buy_atr": self._adverse_excursion_atr(future, entry, atr, "BUY"),
-                    "grid_interval_sell_atr": self._adverse_excursion_atr(future, entry, atr, "SELL"),
-                    "swing_stop_buy_atr": float(np.clip((entry - future["low"].min()) / max(atr, 1e-8), 0.1, 5.0)),
-                    "swing_target_buy_atr": float(np.clip((future["high"].max() - entry) / max(atr, 1e-8), 0.1, 5.0)),
-                    "swing_stop_sell_atr": float(np.clip((future["high"].max() - entry) / max(atr, 1e-8), 0.1, 5.0)),
-                    "swing_target_sell_atr": float(np.clip((entry - future["low"].min()) / max(atr, 1e-8), 0.1, 5.0)),
-                })
-                fallback.append(row)
-            if not fallback:
-                raise ValueError("No valid labelled examples were generated from the available history.")
-            return pd.DataFrame(fallback)
+            raise ValueError("No valid labelled examples were generated from the available history.")
         return pd.DataFrame(rows)

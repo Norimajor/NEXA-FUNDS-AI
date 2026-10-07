@@ -13,13 +13,13 @@ ml_router = APIRouter()
 processor = MarketDataProcessor()
 prediction_threshold = float(os.getenv("MODEL_THRESHOLD", "0.62"))
 h1_engine = TradingEngine(ModelPredictor(
-    os.getenv("NEXA_H1_MODEL_PATH", os.getenv("MODEL_PATH", "models/current.joblib")),
+    os.getenv("NEXA_H1_MODEL_PATH", "models/xauusd_h1_pivot_reversal_20261007.joblib"),
     prediction_threshold,
 ))
 m15_engine = TradingEngine(ModelPredictor(
-    os.getenv("NEXA_M15_MODEL_PATH", os.getenv("MODEL_PATH", "models/current.joblib")),
+    os.getenv("NEXA_M15_MODEL_PATH", "models/xauusd_m15_pivot_reversal_20261007.joblib"),
     prediction_threshold,
-    os.getenv("NEXA_M15_INTERVAL_MODEL_PATH", "models/xauusd_m15_interval_20261006.joblib"),
+    os.getenv("NEXA_M15_INTERVAL_MODEL_PATH", ""),
 ))
 INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
 
@@ -92,6 +92,9 @@ def ml_predict_consensus_endpoint(
     m15_signal = m15.get("signal", "WAIT")
     h1_setup = h1.get("setup_type", "unknown")
     m15_setup = m15.get("setup_type", "unknown")
+    m15_direction = m15.get("direction", "NONE")
+    if m15_direction not in {"BUY", "SELL"}:
+        m15_direction = m15_signal if m15_signal in {"BUY", "SELL"} else "NONE"
     swing_ready = (
         h1_signal in {"BUY", "SELL"}
         and h1_signal == m15_signal
@@ -100,13 +103,19 @@ def ml_predict_consensus_endpoint(
             or (h1_setup == "reversal" and m15_setup == "reversal")
         )
     )
+    normalized_symbol = batch.symbol.upper()
+    is_gold_symbol = "XAUUSD" in normalized_symbol or "GOLD" in normalized_symbol
     scalp_ready = (
-        batch.symbol.upper() == "XAUUSD"
+        is_gold_symbol
         and h1_setup == "no_edge"
-        and m15_signal in {"BUY", "SELL"}
+        and m15_direction in {"BUY", "SELL"}
     )
     recommended_mode = "SWING" if swing_ready else "SCALP" if scalp_ready else "WAIT"
-    signal = m15_signal if recommended_mode in {"SWING", "SCALP"} else "WAIT"
+    signal = (
+        m15_signal if recommended_mode == "SWING"
+        else m15_direction if recommended_mode == "SCALP"
+        else "WAIT"
+    )
     confidence = float(m15.get("confidence", 0.0) or 0.0) if signal != "WAIT" else 0.0
     buy_probability = min(
         float(h1.get("probabilities", {}).get("buy", 0.0) or 0.0),
@@ -120,6 +129,30 @@ def ml_predict_consensus_endpoint(
     m15_levels = m15.get("levels", {}) or {}
     bullish_reversal = m15_levels.get("potential_bullish_reversal") or {}
     bearish_reversal = m15_levels.get("potential_bearish_reversal") or {}
+    entry_zone = bullish_reversal if signal == "BUY" else bearish_reversal if signal == "SELL" else {}
+    entry_zone_low = float(entry_zone.get("low") or 0.0)
+    entry_zone_high = float(entry_zone.get("high") or 0.0)
+    entry_zone_mid = float(entry_zone.get("mid") or 0.0)
+    entry_candle_low = float(m15.get("candle_low") or 0.0)
+    entry_candle_high = float(m15.get("candle_high") or 0.0)
+    valid_entry_zone = (
+        entry_zone_low > 0
+        and entry_zone_high >= entry_zone_low
+        and entry_candle_high >= entry_candle_low > 0
+    )
+    entry_triggered = bool(
+        recommended_mode in {"SWING", "SCALP"}
+        and signal in {"BUY", "SELL"}
+        and valid_entry_zone
+        and entry_candle_low <= entry_zone_high
+        and entry_candle_high >= entry_zone_low
+    )
+    entry_status = (
+        "ZONE_TOUCHED" if entry_triggered
+        else "NO_DIRECTION" if signal not in {"BUY", "SELL"}
+        else "WAIT_FOR_ZONE" if valid_entry_zone
+        else "NO_ENTRY_ZONE"
+    )
     h1_version = h1.get("model_version", "unknown")
     m15_version = m15.get("model_version", "unknown")
 
@@ -132,6 +165,22 @@ def ml_predict_consensus_endpoint(
         "setup_type": m15_setup if signal != "WAIT" else "unknown",
         "direction": signal if signal != "WAIT" else "NONE",
         "recommended_mode": recommended_mode,
+        "planned_direction": signal,
+        "entry_direction": signal if entry_triggered else "WAIT",
+        "entry_triggered": int(entry_triggered),
+        "entry_status": entry_status,
+        "entry_price": entry_zone_mid if valid_entry_zone else 0.0,
+        "entry_zone_low": entry_zone_low if valid_entry_zone else 0.0,
+        "entry_zone_high": entry_zone_high if valid_entry_zone else 0.0,
+        "entry_candle_low": entry_candle_low,
+        "entry_candle_high": entry_candle_high,
+        "entry_zone_source": (
+            m15_levels.get("potential_bullish_reversal_source", "unavailable")
+            if signal == "BUY"
+            else m15_levels.get("potential_bearish_reversal_source", "unavailable")
+            if signal == "SELL"
+            else "unavailable"
+        ),
         "setup_probability": round(confidence / 100.0, 4),
         "buy": round(buy_probability, 2),
         "sell": round(sell_probability, 2),

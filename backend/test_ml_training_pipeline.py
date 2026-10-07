@@ -57,7 +57,17 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         return pd.DataFrame(rows)
 
     def test_dataset_builder_emits_market_structure_probabilities(self):
-        dataset = DatasetBuilder(horizon=6, stop_atr=1.0, target_atr=1.5).build(self._make_candles(420))
+        from core.feature_engine import FEATURE_NAMES
+
+        builder = DatasetBuilder(horizon=6, stop_atr=1.0, target_atr=1.5)
+        feature_values = {name: 0.0 for name in FEATURE_NAMES}
+        with (
+            patch.object(builder.channels, 'detect', return_value=[]),
+            patch.object(builder.zones, 'detect', return_value=[]),
+            patch.object(builder.structure, 'analyze', return_value={'structure': 'NEUTRAL'}),
+            patch.object(builder.features, 'build', return_value=feature_values),
+        ):
+            dataset = builder.build(self._make_candles(420))
         self.assertGreater(len(dataset), 0)
         for key in [
             "label",
@@ -76,6 +86,12 @@ class MultiClassModelPipelineTests(unittest.TestCase):
             "swing_target_buy_atr",
             "swing_stop_sell_atr",
             "swing_target_sell_atr",
+            "pivot_high_distance_atr",
+            "pivot_low_distance_atr",
+            "double_top_similarity_atr",
+            "double_bottom_similarity_atr",
+            "sweep_high",
+            "sweep_low",
         ]:
             self.assertIn(key, dataset.columns)
 
@@ -104,7 +120,8 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         ):
             dataset = builder.build(candles, sample_stride=10)
 
-        self.assertEqual(dataset['timestamp'].tolist(), list(timestamps[250:297:10]))
+        expected_timestamps = pd.to_datetime(timestamps[250:297:10], utc=True)
+        self.assertEqual(dataset['timestamp'].tolist(), list(expected_timestamps))
 
     def test_grid_interval_labels_measure_adverse_move_until_target(self):
         builder = DatasetBuilder(horizon=2, target_atr=1.5, grid_target_distance=1.5)
@@ -150,6 +167,100 @@ class MultiClassModelPipelineTests(unittest.TestCase):
             [expected_features.get(name, 0.0) for name in FEATURE_NAMES],
         )
 
+    def test_fractal_pivot_is_available_only_after_confirmation(self):
+        from core.data_processor import MarketDataProcessor
+        from core.market_structure import MarketStructureAnalyzer
+
+        candles = self._make_candles(300)
+        candles.loc[:, "open"] = 10.0
+        candles.loc[:, "close"] = 10.0
+        candles.loc[:, "high"] = 11.0
+        candles.loc[:, "low"] = 9.0
+        candles.loc[28:29, "high"] = 12.0
+        candles.loc[30, "high"] = 15.0
+        candles.loc[31:32, "high"] = 12.0
+        candles.loc[48:49, "low"] = 8.0
+        candles.loc[50, "low"] = 5.0
+        candles.loc[51:52, "low"] = 8.0
+
+        prepared = MarketDataProcessor().prepare(candles)
+
+        self.assertFalse(bool(prepared.loc[30, "swing_high"]))
+        self.assertTrue(bool(prepared.loc[32, "swing_high"]))
+        self.assertEqual(prepared.loc[32, "swing_high_price"], 15.0)
+        self.assertFalse(bool(prepared.loc[50, "swing_low"]))
+        self.assertTrue(bool(prepared.loc[52, "swing_low"]))
+        self.assertEqual(prepared.loc[52, "swing_low_price"], 5.0)
+        structure = MarketStructureAnalyzer(lookback=300).analyze(prepared)
+        self.assertEqual(structure["last_swing_high"], 15.0)
+        self.assertEqual(structure["last_swing_low"], 5.0)
+
+    def test_reversal_barrier_labels_require_target_before_stop(self):
+        builder = DatasetBuilder(horizon=3, stop_atr=1.0, target_atr=1.5)
+        target_first = pd.DataFrame({"high": [101.0, 101.6], "low": [99.5, 99.2]})
+        stop_first = pd.DataFrame({"high": [100.5, 100.7], "low": [98.9, 99.5]})
+        ambiguous = pd.DataFrame({"high": [101.6], "low": [98.9]})
+
+        self.assertEqual(builder._first_barrier(target_first, 100.0, 1.0, "BUY", 1.0, 1.5), "target")
+        self.assertEqual(builder._first_barrier(stop_first, 100.0, 1.0, "BUY", 1.0, 1.5), "stop")
+        self.assertEqual(builder._first_barrier(ambiguous, 100.0, 1.0, "BUY", 1.0, 1.5), "ambiguous")
+        label = builder._label_from_context({
+            "buy_barrier": "ambiguous",
+            "sell_barrier": "target",
+            "reversal_up": True,
+            "reversal_down": False,
+            "continuation_up": False,
+            "continuation_down": False,
+            "breakout_up": False,
+            "breakout_down": False,
+            "failed_up": False,
+            "failed_down": False,
+        })
+        self.assertEqual(label, (8, "no_edge", "NONE"))
+
+    def test_feature_engine_encodes_repeated_swing_similarity_and_rejection(self):
+        from core.feature_engine import FEATURE_NAMES, FeatureEngine
+
+        frame = pd.DataFrame({
+            "open": [100.0, 100.0, 100.0, 100.0, 100.0],
+            "high": [101.0, 101.0, 102.0, 102.0, 103.0],
+            "low": [99.0, 98.0, 99.0, 98.0, 96.0],
+            "close": [100.0, 100.0, 101.0, 100.0, 102.0],
+            "ema_20": [100.0] * 5,
+            "ema_50": [100.0] * 5,
+            "ema_200": [100.0] * 5,
+            "rsi_14": [50.0] * 5,
+            "macd_hist": [0.0] * 5,
+            "atr_14": [1.0] * 5,
+            "volume_ratio": [1.0] * 5,
+            "return_5": [0.0] * 5,
+            "return_20": [0.0] * 5,
+            "body_ratio": [0.5] * 5,
+            "upper_wick": [0.0, 0.0, 0.0, 0.0, 1.0],
+            "lower_wick": [0.0, 0.0, 0.0, 0.0, 4.0],
+            "swing_high": [False, False, True, True, False],
+            "swing_high_price": [np.nan, np.nan, 105.0, 104.9, np.nan],
+            "swing_low": [False, True, False, False, True],
+            "swing_low_price": [np.nan, 98.0, np.nan, np.nan, 98.2],
+        })
+
+        features = FeatureEngine().build(frame, None, [], {"structure": "NEUTRAL"})
+
+        self.assertEqual(set(FEATURE_NAMES) - set(features), set())
+        self.assertAlmostEqual(features["double_top_similarity_atr"], 0.1)
+        self.assertGreater(features["equal_high_cluster"], 0.0)
+        self.assertEqual(features["sweep_low"], 1.0)
+        self.assertEqual(features["bullish_rejection"], 1.0)
+
+    def test_training_feature_set_includes_pivot_patterns(self):
+        from core.feature_engine import TRAINING_FEATURE_NAMES
+
+        self.assertIn("double_top_similarity_atr", TRAINING_FEATURE_NAMES)
+        self.assertIn("double_bottom_similarity_atr", TRAINING_FEATURE_NAMES)
+        self.assertIn("sweep_high", TRAINING_FEATURE_NAMES)
+        self.assertIn("sweep_low", TRAINING_FEATURE_NAMES)
+        self.assertNotIn("channel_score", TRAINING_FEATURE_NAMES)
+
     def test_predictor_aggregates_multiclass_model_output(self):
         predictor = ModelPredictor.__new__(ModelPredictor)
         predictor.threshold = 0.5
@@ -190,6 +301,32 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         self.assertAlmostEqual(result["probability_reversal"], 0.65)
         self.assertAlmostEqual(result["buy_probability"], 0.72)
         self.assertAlmostEqual(result["sell_probability"], 0.21)
+
+    def test_predictor_maps_expanded_features_to_legacy_model_schema(self):
+        class ShapeCheckingModel:
+            classes_ = np.array(["no_edge", "reversal_buy"])
+
+            def predict_proba(self, X):
+                if X.shape != (1, 2):
+                    raise AssertionError(f"Unexpected model input shape: {X.shape}")
+                np.testing.assert_allclose(X, [[2.0, 1.0]])
+                return np.array([[0.2, 0.8]])
+
+        predictor = ModelPredictor.__new__(ModelPredictor)
+        predictor.threshold = 0.5
+        predictor.bundle = {
+            "model": ShapeCheckingModel(),
+            "feature_names": ["legacy_second", "legacy_first"],
+            "class_names": ["no_edge", "reversal_buy"],
+            "version": "legacy_schema_test",
+        }
+
+        result = predictor.predict(
+            np.array([[99.0, 98.0, 97.0]]),
+            {"legacy_first": 1.0, "legacy_second": 2.0, "new_swing_feature": 3.0},
+        )
+
+        self.assertEqual(result["direction"], "BUY")
 
     def test_predictor_returns_direction_specific_interval_estimates(self):
         predictor = ModelPredictor.__new__(ModelPredictor)
@@ -303,9 +440,12 @@ class MultiClassModelPipelineTests(unittest.TestCase):
             "breakout_buy", "breakout_sell", "failed_breakout_buy", "failed_breakout_sell", "no_edge",
         ] * 25)
 
-        trainer = ModelTrainer(model_dir='models')
-        result = trainer.train(X, y, ['f1', 'f2', 'f3'], version='roc_auc_regression_test')
-        bundle = joblib.load(result['path'])
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as model_dir:
+            trainer = ModelTrainer(model_dir=model_dir)
+            result = trainer.train(X, y, ['f1', 'f2', 'f3'], version='roc_auc_regression_test')
+            bundle = joblib.load(result['path'])
 
         self.assertIn('roc_auc', result['metrics'])
         self.assertGreaterEqual(float(result['metrics']['roc_auc']), 0.0)
@@ -314,6 +454,27 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         self.assertEqual(
             set(result['metrics']['class_recall']),
             set(result['metrics']['classes']),
+        )
+        self.assertEqual(
+            set(result['metrics']['class_precision']),
+            set(result['metrics']['classes']),
+        )
+
+    def test_model_promotion_requires_reversal_class_quality(self):
+        from ml.model_metrics import model_promotion_rejection_reasons
+
+        walk_forward = {"mean_balanced_accuracy": 0.60}
+        metrics = {
+            "balanced_accuracy": 0.60,
+            "roc_auc": 0.70,
+            "class_support": {"reversal_buy": 30, "reversal_sell": 30},
+            "class_recall": {"reversal_buy": 0.40, "reversal_sell": 0.10},
+            "class_precision": {"reversal_buy": 0.50, "reversal_sell": 0.50},
+        }
+
+        self.assertEqual(
+            model_promotion_rejection_reasons(walk_forward, metrics),
+            ["reversal_sell recall below 0.20"],
         )
 
     def test_walk_forward_bounds_fits_with_expanding_chronological_windows(self):
@@ -328,10 +489,12 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         windows = result['windows']
 
         self.assertEqual(len(windows), 5)
-        self.assertEqual(windows[0]['train_end'], 1000)
+        self.assertEqual(windows[0]['train_end'], 988)
+        self.assertEqual(windows[0]['test_start'], 1000)
         self.assertEqual(windows[-1]['test_end'], len(X))
         for previous, current in zip(windows, windows[1:]):
-            self.assertEqual(current['train_end'], previous['test_end'])
+            self.assertEqual(current['test_start'], previous['test_end'])
+            self.assertLessEqual(current['train_end'], current['test_start'] - 12)
             self.assertGreater(current['test_end'], previous['test_end'])
 
 

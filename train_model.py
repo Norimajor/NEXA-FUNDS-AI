@@ -2,14 +2,16 @@
 CSV columns: timestamp,open,high,low,close,volume
 """
 import argparse
+import json
 import math
 from pathlib import Path
 
 import pandas as pd
 
 from core.data_processor import MarketDataProcessor
-from core.feature_engine import FEATURE_NAMES
+from core.feature_engine import TRAINING_FEATURE_NAMES
 from ml.dataset_builder import DatasetBuilder
+from ml.model_metrics import model_promotion_rejection_reasons
 from ml.model_registry import ModelRegistry
 from ml.model_trainer import ModelTrainer
 from ml.walk_forward import WalkForwardValidator
@@ -45,6 +47,7 @@ def load_dataset_from_csvs(paths, max_rows_per_file=50000, sample_stride=1, grid
                     stop_atr=1.0,
                     target_atr=1.5,
                     grid_target_distance=grid_target_distance,
+                    include_context_detectors=False,
                 )
                 first_index = max(250, builder.horizon * 3)
                 eligible_rows = max(0, len(prepared) - first_index - builder.horizon)
@@ -74,6 +77,11 @@ p.add_argument('--sample-stride', type=int, default=1, help='Use every Nth label
 p.add_argument('--max-rows-per-file', type=int, default=50000, help='Maximum labeled examples per file (default: 50000).')
 p.add_argument('--grid-take-profit-distance', type=float, help='Optional price-distance target for direction-specific grid interval labels.')
 p.add_argument('--interval-only', action='store_true', help='Train only grid spacing regressors; do not replace or promote a direction classifier.')
+p.add_argument(
+    '--force-promote',
+    action='store_true',
+    help='Promote even when validation gates fail; metrics and failed gates are saved with the candidate.',
+)
 args = p.parse_args()
 
 csv_paths = [Path(p) for p in args.paths]
@@ -99,7 +107,7 @@ if len(dataset) < 200:
 print('Label distribution:')
 print(dataset['label_name'].value_counts().sort_index().to_string())
 
-X = dataset[FEATURE_NAMES].values
+X = dataset[TRAINING_FEATURE_NAMES].values
 y = dataset.label_name.values
 interval_targets = dataset[['grid_interval_buy_atr', 'grid_interval_sell_atr']].values
 exit_targets = dataset[[
@@ -108,21 +116,28 @@ exit_targets = dataset[[
 ]].values
 if args.interval_only:
     result = ModelTrainer().train_intervals(
-        X, interval_targets, FEATURE_NAMES, args.version, exit_targets
+        X, interval_targets, TRAINING_FEATURE_NAMES, args.version, exit_targets
     )
     print('Interval model:', result)
     raise SystemExit(0)
 wf = WalkForwardValidator().validate(X, y)
 print('Walk-forward:', wf)
-result = ModelTrainer().train(X, y, FEATURE_NAMES, args.version, interval_targets)
+result = ModelTrainer().train(X, y, TRAINING_FEATURE_NAMES, args.version, interval_targets)
 print('Training:', result)
+promotion_rejections = model_promotion_rejection_reasons(wf, result['metrics'])
+result['metrics']['promotion_status'] = (
+    'forced' if promotion_rejections and args.force_promote
+    else 'passed' if not promotion_rejections
+    else 'rejected'
+)
+result['metrics']['forced_promotion'] = bool(promotion_rejections and args.force_promote)
+result['metrics']['promotion_rejections'] = promotion_rejections
+Path(result['path']).with_suffix('.json').write_text(json.dumps(result['metrics'], indent=2))
 ModelRegistry().register(args.version, result['metrics'])
-if (
-    wf['mean_balanced_accuracy'] >= 0.55
-    and result['metrics']['balanced_accuracy'] >= 0.55
-    and result['metrics']['roc_auc'] >= 0.55
-):
+if not promotion_rejections or args.force_promote:
+    if promotion_rejections:
+        print('WARNING: forcing promotion despite failed validation: ' + '; '.join(promotion_rejections))
     ModelRegistry().promote(args.version)
     print('Model promoted to models/current.joblib')
 else:
-    print('Model NOT promoted: out-of-sample quality threshold was not met.')
+    print('Model NOT promoted: ' + '; '.join(promotion_rejections))

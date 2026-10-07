@@ -6,7 +6,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, mean_absolute_error, recall_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, mean_absolute_error, precision_score, recall_score
 from ml.model_metrics import weighted_ovr_roc_auc
 
 
@@ -36,14 +36,21 @@ class ModelTrainer:
             ))
         return models, errors
 
-    def train_intervals(self, X, targets, feature_names, version='interval_candidate', swing_targets=None):
+    def train_intervals(self, X, targets, feature_names, version='interval_candidate', swing_targets=None, purge=12):
         X = np.asarray(X, dtype=float)
         targets = np.asarray(targets, dtype=float)
         if len(X) < 200 or targets.shape != (len(X), 2) or not np.isfinite(targets).all():
             raise ValueError('At least 200 rows and finite buy/sell interval targets are required.')
-        split = int(len(X) * 0.8)
+        split = int(len(X) * 0.8) - purge
+        if split <= 0 or split >= len(X):
+            raise ValueError('Insufficient history for a valid purged chronological split.')
         interval_models, interval_mae = self._fit_regression_heads(X, targets, ('buy', 'sell'), split)
-        metrics = {'grid_interval_mae_atr': interval_mae, 'samples': len(X), 'chronological_test_samples': len(X) - split}
+        metrics = {
+            'grid_interval_mae_atr': interval_mae,
+            'samples': len(X),
+            'purged_samples': purge,
+            'chronological_test_samples': len(X) - split,
+        }
         bundle = {
             'grid_interval_models': interval_models,
             'feature_names': list(feature_names),
@@ -62,14 +69,14 @@ class ModelTrainer:
         (self.dir / f'{version}.json').write_text(json.dumps(metrics, indent=2))
         return {'path': str(path), 'version': version, 'metrics': metrics}
 
-    def train(self, X, y, feature_names, version='candidate', interval_targets=None):
+    def train(self, X, y, feature_names, version='candidate', interval_targets=None, purge=12):
         X = np.asarray(X, dtype=float)
         y = np.asarray(y)
         if len(X) < 200:
             raise ValueError('At least 200 labelled historical examples are required.')
-        split = int(len(X) * 0.8)
+        split = int(len(X) * 0.8) - purge
         if split <= 0 or split >= len(X):
-            raise ValueError('Insufficient history for a valid chronological split.')
+            raise ValueError('Insufficient history for a valid purged chronological split.')
         train_y = y[:split]
         test_y = y[split:]
         if len(np.unique(train_y)) < 2:
@@ -89,12 +96,18 @@ class ModelTrainer:
         proba = model.predict_proba(X[split:])
         roc_auc = weighted_ovr_roc_auc(test_y, proba, model.classes_)
         recalls = recall_score(test_y, pred, labels=model.classes_, average=None, zero_division=0)
+        precisions = precision_score(test_y, pred, labels=model.classes_, average=None, zero_division=0)
+        supports = [(test_y == label).sum() for label in model.classes_]
         metrics = {
             'accuracy': float(accuracy_score(test_y, pred)),
             'balanced_accuracy': float(balanced_accuracy_score(test_y, pred)) if len(np.unique(test_y)) > 1 else 0.5,
             'roc_auc': roc_auc,
+            'purged_samples': purge,
+            'chronological_test_samples': len(X) - split,
             'classes': [str(c) for c in model.classes_],
             'class_recall': {str(label): float(value) for label, value in zip(model.classes_, recalls)},
+            'class_precision': {str(label): float(value) for label, value in zip(model.classes_, precisions)},
+            'class_support': {str(label): int(value) for label, value in zip(model.classes_, supports)},
         }
 
         bundle = {

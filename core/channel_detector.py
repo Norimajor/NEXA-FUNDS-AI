@@ -28,8 +28,8 @@ class ChannelDetector:
         if len(work) < 80:
             return []
 
-        highs = self._pivots(work, "swing_high", "high")
-        lows = self._pivots(work, "swing_low", "low")
+        highs = self._pivots(work, "swing_high", "swing_high_price" if "swing_high_price" in work else "high")
+        lows = self._pivots(work, "swing_low", "swing_low_price" if "swing_low_price" in work else "low")
         if len(highs) < 2 or len(lows) < 2:
             return []
 
@@ -98,7 +98,7 @@ class ChannelDetector:
     def _pivots(df, flag, price_col):
         points = []
         for i, row in df.iterrows():
-            if bool(row[flag]):
+            if bool(row[flag]) and pd.notna(row[price_col]):
                 points.append({"x": i, "price": float(row[price_col])})
         return points
 

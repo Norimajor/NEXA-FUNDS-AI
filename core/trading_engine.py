@@ -60,7 +60,8 @@ class TradingEngine:
         ]:
             if key in decision:
                 probabilities[key] = decision[key]
-        return {'timestamp':df.iloc[-1].timestamp.isoformat(),'price':price,'atr':atr,
+        return {'timestamp':df.iloc[-1].timestamp.isoformat(),'price':price,
+                'candle_high':float(df.iloc[-1].high),'candle_low':float(df.iloc[-1].low),'atr':atr,
                 'signal':decision['signal'],'signal_reason':decision['signal_reason'],'confidence':decision['confidence'],
             'setup_type':decision['setup_type'],'direction':decision['direction'],
             'setup_probability':decision['setup_probability'],

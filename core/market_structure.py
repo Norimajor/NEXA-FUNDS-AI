@@ -1,11 +1,15 @@
 from dataclasses import dataclass
+
+import pandas as pd
 @dataclass
 class MarketStructureAnalyzer:
     lookback:int=150
     def analyze(self,df):
         w=df.tail(self.lookback).reset_index(drop=True)
-        highs=[float(r.high) for _,r in w.iterrows() if bool(r.swing_high)]
-        lows=[float(r.low) for _,r in w.iterrows() if bool(r.swing_low)]
+        high_prices = w["swing_high_price"] if "swing_high_price" in w else w["high"]
+        low_prices = w["swing_low_price"] if "swing_low_price" in w else w["low"]
+        highs=[float(high_prices.iloc[i]) for i in range(len(w)) if bool(w["swing_high"].iloc[i]) and pd.notna(high_prices.iloc[i])]
+        lows=[float(low_prices.iloc[i]) for i in range(len(w)) if bool(w["swing_low"].iloc[i]) and pd.notna(low_prices.iloc[i])]
         s='NEUTRAL'
         if len(highs)>=2 and len(lows)>=2:
             hh,hl=highs[-1]>highs[-2],lows[-1]>lows[-2]; lh,ll=highs[-1]<highs[-2],lows[-1]<lows[-2]
