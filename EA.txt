@@ -1,14 +1,14 @@
 //+------------------------------------------------------------------+
-//|                                    NEXA AI 2.34 |
+//|                                    NEXA AI 2.35 |
 //|                        Copyright 2024, MetaQuotes Software Corp. |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Software Corp."
 #property link      "https://www.mql5.com"
-#property version   "2.34"
-#property description "NEXA AI 2.34 - learned trend model and ML-only entries"
+#property version   "2.35"
+#property description "NEXA AI 2.35 - responsive dashboard and learned ML entries"
 
-#define NEXA_VERSION "2.34"
+#define NEXA_VERSION "2.35"
 #define EA_VERSION NEXA_VERSION
 #define DASHBOARD_VERSION NEXA_VERSION
 #define EA_MAGIC_NUMBER 123456
@@ -116,7 +116,7 @@ input group "=== NEXA ML SERVICE CONNECTION ==="
 input bool InpUseMLService = true;                     // Check a real ML service endpoint
 const string ML_RENDER_BASE_URL = "https://nexa-funds-ai.onrender.com";
 input string InpMLApiKey = "8d3f0c29059244368ac6203b1b32118ae2d27035e79f4c559b0f9106d952ab32";                         // Render INGEST_API_KEY sent as x-api-key
-input int InpMLTimeoutMs = 60000;                      // Allow for Render free-tier cold starts (milliseconds)
+input int InpMLTimeoutMs = 5000;                       // Synchronous request timeout; capped at 5 seconds
 input int InpMLCheckSeconds = 5;                       // Seconds between ML inference requests
 input double InpMLExecutionConfidence = 60.0;          // Minimum ML confidence required for execution
 
@@ -274,6 +274,8 @@ MLLinkState ml_link_state=ML_LINK_DISABLED;
 int ml_link_http_code=0, ml_link_latency_ms=0;
 string ml_link_error="", ml_last_gate_status="";
 datetime ml_link_last_attempt=0, ml_link_last_success=0;
+datetime ml_retry_not_before=0;
+int ml_consecutive_failures=0;
 bool ml_prediction_available=false;
 string ml_prediction_signal="WAIT", ml_prediction_setup_type="no_model", ml_prediction_direction="NONE", ml_prediction_model_version="";
 string ml_prediction_reason="NO_PREDICTION", ml_bullish_reversal_source="unavailable", ml_bearish_reversal_source="unavailable";
@@ -326,6 +328,7 @@ bool MLCurrentPriceInsideEntryZone();
 int CountEAOpenPositions();
 string ModeReadinessText();
 string MLHeaders();
+int MLRequestTimeoutMs();
 double ScalpGridSpacing(string direction);
 bool GetScalpBasketStats(int &count,double &volume,double &average,double &target,double &floating,string &direction);
 void UpdateScalpBasketTakeProfit();
@@ -1242,7 +1245,7 @@ string MLLinkDetailText() {
     if(ml_link_state==ML_LINK_NOT_CONFIGURED) return "Endpoint not set";
     if(ml_link_state==ML_LINK_CONNECTED)      return ml_prediction_available?StringFormat("HTTP 200 | H1 %s | M15 %s | %s",ml_trend_direction,ml_m15_signal,ml_confirmation_status):StringFormat("HTTP 200 | %d ms",ml_link_latency_ms);
     if(ml_link_state==ML_LINK_HTTP_ERROR)     return StringFormat("HTTP %d | %s",ml_link_http_code,ml_link_error);
-    if(ml_link_state==ML_LINK_TIMEOUT)        return StringFormat("Timeout after %d ms",InpMLTimeoutMs);
+    if(ml_link_state==ML_LINK_TIMEOUT)        return StringFormat("Timeout after %d ms",MLRequestTimeoutMs());
     return ml_link_error!=""?ml_link_error:"No detail available";
 }
 string MLLinkLastSuccessText() {
@@ -1251,7 +1254,11 @@ string MLLinkLastSuccessText() {
 }
 string MLLinkLastAttemptText() {
     if(ml_link_last_attempt<=0) return "Last attempt: none";
-    return "Last attempt: "+TimeToString(ml_link_last_attempt,TIME_SECONDS)+"  |  retry "+IntegerToString(MathMax(1,InpMLCheckSeconds))+"s";
+    int retry_in=(int)MathMax(0,ml_retry_not_before-TimeCurrent());
+    return "Last attempt: "+TimeToString(ml_link_last_attempt,TIME_SECONDS)+"  |  retry "+IntegerToString(retry_in>0?retry_in:(int)MathMax(1,InpMLCheckSeconds))+"s";
+}
+int MLRequestTimeoutMs() {
+    return (int)MathMax(500,MathMin(5000,InpMLTimeoutMs));
 }
 void AddMLDashboardLog(string message) {
     int count=ArraySize(ml_dashboard_logs);
@@ -1274,44 +1281,6 @@ double ScalpGridSpacing(string direction) {
     double learned=learned_atr*ml_m15_atr;
     return MathMax(configured,MathMin(learned,configured*3.0));
 }
-//--- performs a genuine request; the dashboard only ever shows this result
-void PollMLService(bool force) {
-    if(!InpUseMLService) { SetMLLinkState(ML_LINK_DISABLED,0,"Service check switched off"); return; }
-    if(StringLen(ML_RENDER_BASE_URL)<8) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"Render endpoint not configured"); return; }
-    if(IsTesterRun()) { SetMLLinkState(ML_LINK_DISABLED,0,"WebRequest unavailable in Strategy Tester"); return; }
-
-    datetime now=TimeCurrent();
-    if(!force && ml_link_last_attempt>0 && now-ml_link_last_attempt<MathMax(1,InpMLCheckSeconds)) return;
-    ml_link_last_attempt=now;
-    if(ml_link_state!=ML_LINK_CONNECTED) SetMLLinkState(ML_LINK_CONNECTING,0,"Contacting endpoint");
-
-    char request[]; char response[]; string response_headers="";
-    string headers=MLHeaders();
-    uint started=GetTickCount();
-    ResetLastError();
-    int status=WebRequest("GET",ML_RENDER_BASE_URL+"/health",headers,MathMax(500,InpMLTimeoutMs),request,response,response_headers);
-    int elapsed=(int)(GetTickCount()-started);
-    int error_code=GetLastError();
-
-    if(status==-1) {
-        //--- 4014 blocked function, 5200 bad URL, 5201 no connection, 5202 timeout, 5203 request failed
-        if(error_code==4014) { SetMLLinkState(ML_LINK_NOT_PERMITTED,0,"Allow "+ML_RENDER_BASE_URL+" in Tools > Options > Expert Advisors"); return; }
-        if(error_code==5200) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"Endpoint URL is not valid"); return; }
-        if(error_code==5202 || elapsed>=MathMax(500,InpMLTimeoutMs)) { SetMLLinkState(ML_LINK_TIMEOUT,0,StringFormat("No answer within %d ms",InpMLTimeoutMs)); return; }
-        SetMLLinkState(ML_LINK_UNREACHABLE,0,StringFormat("%s (error %d)",ML_RENDER_BASE_URL,error_code));
-        return;
-    }
-    if(status==0) { SetMLLinkState(ML_LINK_NO_RESPONSE,0,StringFormat("Empty reply after %d ms",elapsed)); return; }
-    if(status<200 || status>=300) {
-        string body=CharArrayToString(response,0,MathMin(120,ArraySize(response)));
-        StringReplace(body,"\r"," "); StringReplace(body,"\n"," ");
-        SetMLLinkState(ML_LINK_HTTP_ERROR,status,body!=""?body:"Server returned an error");
-        return;
-    }
-    ml_link_latency_ms=elapsed; ml_link_last_success=now;
-    SetMLLinkState(ML_LINK_CONNECTED,status,StringFormat("HTTP %d | %d ms",status,elapsed));
-}
-
 string MLServiceBaseUrl() {
     return ML_RENDER_BASE_URL;
 }
@@ -1597,8 +1566,21 @@ bool RequestMLPrediction() {
     string body=BuildMLCandlePayload(); if(body=="") { SetMLLinkState(ML_LINK_NO_RESPONSE,0,"Fewer than 260 completed H1 or M15 candles available"); return false; }
     char request[]; char response[]; string response_headers=""; string headers=MLHeaders();
     StringToCharArray(body,request,0,StringLen(body),CP_UTF8); ResetLastError(); uint started=GetTickCount();
-    int status=WebRequest("POST",base+"/api/ml/predict/consensus",headers,MathMax(500,InpMLTimeoutMs),request,response,response_headers);
+    SetMLLinkState(ML_LINK_CONNECTING,0,"Requesting current ML analysis");
+    int status=WebRequest("POST",base+"/api/ml/predict/consensus",headers,MLRequestTimeoutMs(),request,response,response_headers);
     int error_code=GetLastError(); int elapsed=(int)(GetTickCount()-started);
+    if(status==-1) {
+        if(error_code==4014) SetMLLinkState(ML_LINK_NOT_PERMITTED,0,"Allow "+base+" in Tools > Options > Expert Advisors");
+        else if(error_code==5200) SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"Endpoint URL is not valid");
+        else if(error_code==5202 || elapsed>=MLRequestTimeoutMs())
+            SetMLLinkState(ML_LINK_TIMEOUT,0,StringFormat("No answer within %d ms",MLRequestTimeoutMs()));
+        else SetMLLinkState(ML_LINK_UNREACHABLE,0,StringFormat("%s (error %d)",base,error_code));
+        return false;
+    }
+    if(status==0) {
+        SetMLLinkState(ML_LINK_NO_RESPONSE,0,StringFormat("Empty reply after %d ms",elapsed));
+        return false;
+    }
     if(status<200 || status>=300) {
         string detail=status>0?CharArrayToString(response,0,MathMin(160,ArraySize(response))):StringFormat("request error %d",error_code);
         SetMLLinkState(ML_LINK_HTTP_ERROR,status,detail); return false;
@@ -1639,16 +1621,29 @@ void ClearMLPrediction(string reason) {
 bool UpdateMLPrediction() {
     if(!runtime_ml_enabled || !InpUseMLService || IsTesterRun()) {
         ClearMLPrediction("ML inference disabled or unavailable");
+        ml_consecutive_failures=0;
+        ml_retry_not_before=0;
         return false;
     }
     if(ml_inference_in_progress) return false;
     datetime now=TimeCurrent();
+    if(now<ml_retry_not_before) return false;
     if(last_ml_inference_attempt>0 && now-last_ml_inference_attempt<MathMax(1,InpMLCheckSeconds)) return false;
     last_ml_inference_attempt=now;
     ml_inference_in_progress=true;
     bool success=RequestMLPrediction();
     ml_inference_in_progress=false;
-    if(!success) ClearMLPrediction("Latest ML request failed; waiting for fresh prediction");
+    if(success) {
+        ml_consecutive_failures=0;
+        ml_retry_not_before=0;
+    } else {
+        ClearMLPrediction("Latest ML request failed; waiting for fresh prediction");
+        ml_consecutive_failures=(int)MathMin(ml_consecutive_failures+1,5);
+        int retry_delay=(int)MathMax(1,InpMLCheckSeconds);
+        for(int attempt=1;attempt<ml_consecutive_failures;attempt++)
+            retry_delay=(int)MathMin(60,retry_delay*2);
+        ml_retry_not_before=now+retry_delay;
+    }
     return success;
 }
 
@@ -1726,8 +1721,10 @@ int OnInit() {
     ArrayResize(active_trades,0); ArrayResize(closed_trades,0);
     adaptive_config.supplied=false; adaptive_config.generated_at=0; adaptive_config.confidence=0; adaptive_config.source="NONE";
     trade.SetExpertMagicNumber(EA_MAGIC_NUMBER); trade.SetDeviationInPoints(10); trade.SetTypeFillingBySymbol(_Symbol);
-    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) return INIT_FAILED;
-    ResetCounters(); RecoverOpenTrades(); LoadAdaptiveConfiguration(); InitializeTesterDataFiles(); PollMLService(true); CreateDashboard(); WriteTelemetryHeartbeat("ACTIVE");
+    ResetCounters(); RecoverOpenTrades(); LoadAdaptiveConfiguration(); InitializeTesterDataFiles();
+    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
+        Print("[NEXA][INFO] Trading permission is disabled; dashboard remains available and order entry is blocked.");
+    CreateDashboard(); ChartRedraw(); WriteTelemetryHeartbeat("ACTIVE");
     EventSetTimer(MathMax(1,InpDashboardUpdateSeconds));
     PrintRuntimeSettings("INITIALIZED");
     Print("[NEXA] Data files: ",DataFileName("decisions"),", ",DataFileName("outcomes")," and ",DataFileName("ml"));
@@ -1779,7 +1776,7 @@ bool ValidateInputs() {
     if(InpScalpMaxPositions<=0 || InpScalpMaxPositions>20 || InpScalpTakeProfitPips<=0 || InpScalpGridIntervalPips<=0 || InpScalpLotMultiplier<1.0 || InpScalpLotMultiplier>2.0) return false;
     if(InpATRMultiplierTP<=InpATRMultiplierSL) return false;
     if(InpMinAdaptiveWeight<0 || InpMaxAdaptiveWeight<InpMinAdaptiveWeight || !IsFiniteWeight(InpDefaultWeight)) return false;
-    if(InpMLConfigTimeoutMinutes<=0 || InpDashboardUpdateSeconds<=0 || InpBrokerUtcOffsetHours<-23 || InpBrokerUtcOffsetHours>23) return false;
+    if(InpMLConfigTimeoutMinutes<=0 || InpDashboardUpdateSeconds<=0 || InpMLCheckSeconds<=0 || InpMLTimeoutMs<=0 || InpBrokerUtcOffsetHours<-23 || InpBrokerUtcOffsetHours>23) return false;
     if(InpDashboardScale<75 || InpDashboardScale>150 || InpNewsFilterMinutes<0) return false;
     if(InpMLExecutionConfidence<50.0 || InpMLExecutionConfidence>100.0) return false;
     return true;
@@ -2473,7 +2470,7 @@ void ResetCounters() {
 //+------------------------------------------------------------------+
 void OnTimer() {
     WriteTelemetryHeartbeat("ACTIVE");
-    PollMLService(false);
+    UpdateDashboard();
     UpdateMLPrediction();
     DrawMLPointOfInterest();
     string gate_status=ModeReadinessText();
@@ -2486,7 +2483,6 @@ void OnTimer() {
         last_ml_communication_log=now;
         AddMLDashboardLog(StringFormat("ML HEARTBEAT | %s | HTTP %d | prediction %s",MLLinkStateText(),ml_link_http_code,ml_prediction_available?"AVAILABLE":"NONE"));
     }
-    UpdateDashboard();
 }
 
 //+------------------------------------------------------------------+
