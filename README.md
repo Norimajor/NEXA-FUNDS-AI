@@ -20,6 +20,8 @@ H1 trend bias is calculated separately from the model's future trade-setup class
 
 The current H1/M15 reversal candidates were force-promoted despite failing validation gates, and their recorded reversal precision and recall are weak. The staged direction/confirmation flow makes those model outputs explicit and avoids trading without the expected confirmations; it does not improve the trained weights or guarantee a sharp reversal, accurate prediction, or profitable trade. Retrain and promote candidates only after they pass the documented out-of-sample validation gates.
 
+The EA Logs tab records the H1 trend evidence, M15 top and runner-up model classes, raw setup reason, aligned/conflicting market-context cues, selected POI, entry-zone status, and execution gate. Class scores describe the classifier ranking; context cues are separate observable features, not feature attribution or proof of causation. The EA marks the selected structural POI on-chart while retaining its M15 confirmation and live-quote entry checks. Scalp grid spacing uses a trained direction-specific adverse-excursion estimate in ATR units when that regression model is available, bounded between the configured base spacing and three times that spacing; otherwise it explicitly falls back to the configured base interval. The EA title and embedded dashboard version are sourced from the same version constant.
+
 ## API
 `GET /health`
 `POST /api/market/candles`

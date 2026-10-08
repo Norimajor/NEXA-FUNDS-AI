@@ -24,6 +24,44 @@ m15_engine = TradingEngine(ModelPredictor(
 INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
 
 
+def _setup_context(features: dict, direction: str) -> str:
+    aligned = []
+    opposed = []
+    directional_features = (
+        ("ema_distance_20_50", "20/50 EMA alignment"),
+        ("ema_distance_50_200", "50/200 EMA alignment"),
+        ("return_20", "20-bar momentum"),
+        ("swing_high_change_atr", "swing-high progression"),
+        ("swing_low_change_atr", "swing-low progression"),
+    )
+    sign = 1.0 if direction == "BUY" else -1.0
+    for name, label in directional_features:
+        value = float(features.get(name, 0.0) or 0.0)
+        if abs(value) < 1e-8:
+            continue
+        (aligned if value * sign > 0 else opposed).append(f"{label} {'+' if value > 0 else '-'}")
+
+    structure_key = "structure_bull" if direction == "BUY" else "structure_bear"
+    opposite_structure_key = "structure_bear" if direction == "BUY" else "structure_bull"
+    if float(features.get(structure_key, 0.0) or 0.0) > 0:
+        aligned.append("swing structure agrees")
+    elif float(features.get(opposite_structure_key, 0.0) or 0.0) > 0:
+        opposed.append("swing structure conflicts")
+    sweep_key = "sweep_low" if direction == "BUY" else "sweep_high"
+    rejection_key = "bullish_rejection" if direction == "BUY" else "bearish_rejection"
+    if float(features.get(sweep_key, 0.0) or 0.0) > 0:
+        aligned.append("liquidity sweep")
+    if float(features.get(rejection_key, 0.0) or 0.0) > 0:
+        aligned.append("directional candle rejection")
+
+    parts = []
+    if aligned:
+        parts.append("aligned context: " + ", ".join(aligned[:4]))
+    if opposed:
+        parts.append("conflicting context: " + ", ".join(opposed[:2]))
+    return "; ".join(parts) if parts else "no listed context cue; classifier output is the decision basis"
+
+
 class Candle(BaseModel):
     timestamp: str
     open: float
@@ -151,10 +189,18 @@ def ml_predict_consensus_endpoint(
     m15_levels = m15.get("levels", {}) or {}
     bullish_reversal = m15_levels.get("potential_bullish_reversal") or {}
     bearish_reversal = m15_levels.get("potential_bearish_reversal") or {}
-    entry_zone = bullish_reversal if signal == "BUY" else bearish_reversal if signal == "SELL" else {}
+    poi_direction = signal if signal in {"BUY", "SELL"} else h1_direction
+    entry_zone = bullish_reversal if poi_direction == "BUY" else bearish_reversal if poi_direction == "SELL" else {}
     entry_zone_low = float(entry_zone.get("low") or 0.0)
     entry_zone_high = float(entry_zone.get("high") or 0.0)
     entry_zone_mid = float(entry_zone.get("mid") or 0.0)
+    poi_source = (
+        m15_levels.get("potential_bullish_reversal_source", "unavailable")
+        if poi_direction == "BUY"
+        else m15_levels.get("potential_bearish_reversal_source", "unavailable")
+        if poi_direction == "SELL"
+        else "unavailable"
+    )
     entry_candle_low = float(m15.get("candle_low") or 0.0)
     entry_candle_high = float(m15.get("candle_high") or 0.0)
     valid_entry_zone = (
@@ -184,6 +230,39 @@ def ml_predict_consensus_endpoint(
         else "WAIT_M15_CONFIRMATION" if h1_direction in {"BUY", "SELL"}
         else "NO_TREND_DIRECTION"
     )
+    model_class = m15.get(
+        "model_class",
+        f"{m15_setup}_{m15_direction.lower()}" if m15_direction in {"BUY", "SELL"} else m15_setup,
+    )
+    model_class_probability = float(
+        m15.get(
+            "model_class_probability",
+            m15.get("setup_probability", float(m15.get("confidence", 0.0) or 0.0) / 100.0),
+        )
+        or 0.0
+    )
+    runner_up_class = m15.get("runner_up_class", "unavailable")
+    runner_up_probability = float(m15.get("runner_up_probability", 0.0) or 0.0)
+    setup_reason = (
+        f"M15 top class {model_class} score {model_class_probability:.3f}; "
+        f"runner-up {runner_up_class} score {runner_up_probability:.3f}; "
+        f"raw signal {m15_signal} ({m15.get('signal_reason', 'not supplied')})"
+    )
+    context_direction = m15_direction
+    if context_direction not in {"BUY", "SELL"}:
+        candidate_direction = m15.get("direction", "NONE")
+        context_direction = candidate_direction if candidate_direction in {"BUY", "SELL"} else "NONE"
+    setup_context = _setup_context(m15.get("features", {}) or {}, context_direction)
+    poi_reason = (
+        f"{poi_direction} structural POI from {poi_source} at "
+        f"{entry_zone_low:g}-{entry_zone_high:g}"
+        if poi_direction in {"BUY", "SELL"} and entry_zone_low > 0
+        else "No directional structural POI available"
+    )
+    decision_explanation = (
+        f"H1 trend {h1_direction}: {h1.get('trend_reason', 'trend evidence unavailable')}; "
+        f"{setup_reason}; context {setup_context}; POI {poi_reason}; entry {entry_status}"
+    )
 
     return {
         "symbol": batch.symbol.upper(),
@@ -204,9 +283,18 @@ def ml_predict_consensus_endpoint(
         "trend_direction": h1_direction,
         "trend_strength": round(float(h1.get("trend_strength", 0.0) or 0.0), 3),
         "trend_reason": h1.get("trend_reason", "MODEL_OR_LEGACY_DIRECTION"),
+        "model_class": model_class,
+        "model_class_probability": round(model_class_probability, 4),
+        "runner_up_class": runner_up_class,
+        "runner_up_probability": round(runner_up_probability, 4),
+        "setup_reason": setup_reason,
+        "setup_context": setup_context,
+        "decision_explanation": decision_explanation,
         "confirmation_status": confirmation_status,
         "recommended_mode": recommended_mode,
         "planned_direction": signal,
+        "poi_direction": poi_direction,
+        "poi_reason": poi_reason,
         "entry_direction": signal if entry_triggered else "WAIT",
         "entry_triggered": int(entry_triggered),
         "entry_status": entry_status,
@@ -215,13 +303,7 @@ def ml_predict_consensus_endpoint(
         "entry_zone_high": entry_zone_high if valid_entry_zone else 0.0,
         "entry_candle_low": entry_candle_low,
         "entry_candle_high": entry_candle_high,
-        "entry_zone_source": (
-            m15_levels.get("potential_bullish_reversal_source", "unavailable")
-            if signal == "BUY"
-            else m15_levels.get("potential_bearish_reversal_source", "unavailable")
-            if signal == "SELL"
-            else "unavailable"
-        ),
+        "entry_zone_source": poi_source,
         "setup_probability": round(confidence / 100.0, 4),
         "buy": round(buy_probability, 2),
         "sell": round(sell_probability, 2),

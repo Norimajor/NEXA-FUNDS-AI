@@ -118,6 +118,12 @@ class ModelPredictor:
         best_index = int(np.argmax(probabilities))
         best_class = str(classes[best_index]).strip().lower().replace('-', '_').replace(' ', '_')
         setup_probability = float(probabilities[best_index])
+        ranked_indices = np.argsort(probabilities)[::-1]
+        runner_up_index = int(ranked_indices[1]) if len(ranked_indices) > 1 else best_index
+        runner_up_class = (
+            str(classes[runner_up_index]).strip().lower().replace('-', '_').replace(' ', '_')
+        )
+        runner_up_probability = float(probabilities[runner_up_index])
         if best_class.endswith('_buy') or best_class.endswith('_sell'):
             setup_type = best_class.rsplit('_', 1)[0]
             direction = 'BUY' if best_class.endswith('_buy') else 'SELL'
@@ -144,6 +150,10 @@ class ModelPredictor:
             'probability_no_edge': event_probabilities['no_edge'],
             'setup_type': setup_type,
             'direction': direction,
+            'model_class': best_class,
+            'model_class_probability': setup_probability,
+            'runner_up_class': runner_up_class,
+            'runner_up_probability': runner_up_probability,
             'setup_probability': setup_probability,
             'signal': signal,
             'threshold': self.threshold,

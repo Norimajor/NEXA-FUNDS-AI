@@ -1,14 +1,14 @@
 //+------------------------------------------------------------------+
-//|                                    NEXA AI 2.31 |
+//|                                    NEXA AI 2.32 |
 //|                        Copyright 2024, MetaQuotes Software Corp. |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Software Corp."
 #property link      "https://www.mql5.com"
-#property version   "2.31"
-#property description "NEXA AI 2.31 - training-aligned H1 trend and setup separation"
+#property version   "2.32"
+#property description "NEXA AI 2.32 - ML decision rationale and chart POI"
 
-#define NEXA_VERSION "2.31"
+#define NEXA_VERSION "2.32"
 #define EA_VERSION NEXA_VERSION
 #define DASHBOARD_VERSION NEXA_VERSION
 #define EA_MAGIC_NUMBER 123456
@@ -141,7 +141,7 @@ input bool InpForceDataLoggingInTester = true;         // Always write ML datase
 input group "=== NEXA ML SERVICE CONNECTION ==="
 input bool InpUseMLService = true;                     // Check a real ML service endpoint
 const string ML_RENDER_BASE_URL = "https://nexa-funds-ai.onrender.com";
-input string InpMLApiKey = "";                         // Render INGEST_API_KEY sent as x-api-key
+input string InpMLApiKey = "8d3f0c29059244368ac6203b1b32118ae2d27035e79f4c559b0f9106d952ab32";                         // Render INGEST_API_KEY sent as x-api-key
 input int InpMLTimeoutMs = 60000;                      // Allow for Render free-tier cold starts (milliseconds)
 input int InpMLCheckSeconds = 5;                       // Seconds between ML inference requests
 input double InpMLExecutionConfidence = 60.0;          // Minimum ML confidence required for execution
@@ -312,6 +312,7 @@ string stage_session="", stage_regime="", stage_ranging="", stage_volatility="";
 string stage_direction="", stage_source="", stage_mode="", stage_snapshot="", stage_key_readings="";
 double stage_bull=0, stage_bear=0, stage_spread=0; int stage_confirmations=0;
 string dashboard_prefix="NEXA_DASH_";
+string ml_poi_prefix="NEXA_ML_POI_";
 string pending_decision_id="";
 //--- live ML service link state, only ever set by a real request result
 MLLinkState ml_link_state=ML_LINK_DISABLED;
@@ -323,6 +324,9 @@ string ml_prediction_signal="WAIT", ml_prediction_setup_type="no_model", ml_pred
 string ml_prediction_reason="NO_PREDICTION", ml_bullish_reversal_source="unavailable", ml_bearish_reversal_source="unavailable";
 string ml_recommended_mode="WAIT", ml_h1_signal="WAIT", ml_m15_signal="WAIT", ml_h1_setup_type="unknown";
 string ml_trend_direction="NONE", ml_confirmation_status="NO_TREND_DIRECTION";
+string ml_poi_direction="NONE", ml_setup_reason="No ML explanation received";
+string ml_setup_context="No setup context received", ml_poi_reason="No structural POI";
+string ml_trend_reason="Trend evidence unavailable", ml_model_class="unknown", ml_runner_up_class="unknown";
 string ml_h1_model_version="unknown", ml_m15_model_version="unknown";
 string ml_h1_candle_time="", ml_m15_candle_time="";
 string ml_entry_direction="WAIT", ml_planned_direction="WAIT", ml_entry_status="NO_ENTRY_DATA", ml_entry_zone_source="unavailable";
@@ -339,6 +343,7 @@ double ml_potential_bullish_reversal_low=0, ml_potential_bullish_reversal_high=0
 double ml_potential_bearish_reversal_low=0, ml_potential_bearish_reversal_high=0;
 double ml_entry_price=0, ml_entry_zone_low=0, ml_entry_zone_high=0;
 double ml_entry_candle_low=0, ml_entry_candle_high=0;
+double ml_model_class_probability=0, ml_runner_up_probability=0;
 double ml_breakout_up=0, ml_breakout_down=0;
 double ml_m15_atr=0, ml_grid_interval_buy_atr=0, ml_grid_interval_sell_atr=0;
 double ml_swing_stop_buy_atr=0, ml_swing_target_buy_atr=0, ml_swing_stop_sell_atr=0, ml_swing_target_sell_atr=0;
@@ -360,6 +365,8 @@ bool CheckChangeOfCharacter(SupplyDemandZone &zone);
 void UpdateDashboard();
 void RecoverOpenTrades();
 void RenderDashboard();
+void DrawMLPointOfInterest();
+void RemoveMLPointOfInterest();
 void CloseAllEAPositions();
 bool IsNewsBlocked();
 double ScalpPipSize();
@@ -372,6 +379,7 @@ bool MLCurrentPriceInsideEntryZone();
 int CountEAOpenPositions();
 string ModeReadinessText();
 string MLHeaders();
+double ScalpGridSpacing(string direction);
 bool GetScalpBasketStats(int &count,double &volume,double &average,double &target,double &floating,string &direction);
 void UpdateScalpBasketTakeProfit();
 
@@ -552,10 +560,17 @@ void DrawStrategyTab() {
     DrawSection("MODE CONDITIONS",250);
     SetRoundedPanel("ModeConditions",18,274,414,132,DashCard(),DashBorderSoft(),DashBg(),3);
     SetDashboardLabel("SwingCondition",StringFormat("SWING  AUTO: H1 direction + learned M15 setup/reversal; confidence >= %.0f%%",runtime_ml_execution_confidence),28,284,8,DashText());
-    SetDashboardLabel("ScalpCondition",StringFormat("SCALP  ML confidence >= %.0f%%; TP %.0f pips; add every %.0f pips; x%.2f; max %.2f lots/order",MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence),InpScalpTakeProfitPips,InpScalpGridIntervalPips,InpScalpLotMultiplier,0.10),28,306,8,DashText());
+    SetDashboardLabel("ScalpCondition",StringFormat("SCALP  ML confidence >= %.0f%%; TP %.0f pips; base grid %.0f pips; x%.2f; max %.2f lots/order",
+        MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence),InpScalpTakeProfitPips,
+        InpScalpGridIntervalPips,InpScalpLotMultiplier,0.10),28,306,8,DashText());
     SetDashboardLabel("ModeStatus",ModeReadinessText(),28,334,10,StringFind(ModeReadinessText(),"READY")==0?DashGreen():DashAccent(),FontMedium());
     SetDashboardLabel("ModeReason",StringFormat("H1 %s/%s  |  M15 %s  %.0f%%  |  %s",ml_h1_setup_type,ml_h1_signal,ml_m15_signal,ml_m15_confidence,ml_prediction_reason),28,359,8,DashMuted());
-    SetDashboardLabel("ModeExecution",StringFormat("XAU pip = $%.2f  |  TP $%.2f  |  add $%.2f adverse",ScalpPipSize(),InpScalpTakeProfitPips*ScalpPipSize(),InpScalpGridIntervalPips*ScalpPipSize()),28,380,8,DashMuted());
+    string grid_source=(ml_prediction_signal=="BUY" || ml_prediction_signal=="SELL") &&
+        ml_m15_atr>0 && (ml_prediction_signal=="BUY"?ml_grid_interval_buy_atr:ml_grid_interval_sell_atr)>0?
+        "learned":"configured fallback";
+    SetDashboardLabel("ModeExecution",StringFormat("XAU pip = $%.2f | TP $%.2f | %s grid $%.2f (base $%.2f)",
+        ScalpPipSize(),InpScalpTakeProfitPips*ScalpPipSize(),grid_source,
+        ScalpGridSpacing(ml_prediction_signal),InpScalpGridIntervalPips*ScalpPipSize()),28,380,8,DashMuted());
 }
 void DrawInfoTab() {
     int wins=0,losses=0,deals=0; double pnl=TodayNetProfit(wins,losses,deals); double spread=(SymbolInfoDouble(_Symbol,SYMBOL_ASK)-SymbolInfoDouble(_Symbol,SYMBOL_BID))/_Point;
@@ -581,6 +596,63 @@ color MLLinkColor() {
     if(ml_link_state==ML_LINK_CONNECTED) return DashGreen();
     if(ml_link_state==ML_LINK_DISABLED || ml_link_state==ML_LINK_NOT_CONFIGURED || ml_link_state==ML_LINK_CONNECTING) return DashMuted();
     return DashRed();
+}
+string CompactMLText(string value,int max_length=70) {
+    StringReplace(value,"; "," | ");
+    if(StringLen(value)>max_length) return StringSubstr(value,0,max_length-3)+"...";
+    return value;
+}
+void RemoveMLPointOfInterest() {
+    ObjectDelete(0,ml_poi_prefix+"ZONE");
+    ObjectDelete(0,ml_poi_prefix+"MID");
+    ObjectDelete(0,ml_poi_prefix+"LABEL");
+}
+void DrawMLPointOfInterest() {
+    bool valid=ml_prediction_available &&
+        (ml_poi_direction=="BUY" || ml_poi_direction=="SELL") &&
+        ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low;
+    if(!valid) {
+        RemoveMLPointOfInterest();
+        return;
+    }
+    datetime now=TimeCurrent();
+    int seconds=MathMax(1,PeriodSeconds(_Period));
+    datetime left=now-seconds*20;
+    datetime right=now+seconds*6;
+    color poi_color=ml_poi_direction=="BUY"?DashGreen():DashRed();
+    string zone=ml_poi_prefix+"ZONE";
+    if(ObjectFind(0,zone)<0) ObjectCreate(0,zone,OBJ_RECTANGLE,0,left,ml_entry_zone_high,right,ml_entry_zone_low);
+    else {
+        ObjectMove(0,zone,0,left,ml_entry_zone_high);
+        ObjectMove(0,zone,1,right,ml_entry_zone_low);
+    }
+    ObjectSetInteger(0,zone,OBJPROP_COLOR,poi_color);
+    ObjectSetInteger(0,zone,OBJPROP_STYLE,STYLE_DASH);
+    ObjectSetInteger(0,zone,OBJPROP_WIDTH,1);
+    ObjectSetInteger(0,zone,OBJPROP_FILL,true);
+    ObjectSetInteger(0,zone,OBJPROP_BACK,true);
+    ObjectSetInteger(0,zone,OBJPROP_SELECTABLE,false);
+    ObjectSetInteger(0,zone,OBJPROP_HIDDEN,true);
+    string mid=ml_poi_prefix+"MID";
+    if(ObjectFind(0,mid)<0) ObjectCreate(0,mid,OBJ_HLINE,0,0,ml_entry_price>0?ml_entry_price:(ml_entry_zone_low+ml_entry_zone_high)*0.5);
+    ObjectSetDouble(0,mid,OBJPROP_PRICE,ml_entry_price>0?ml_entry_price:(ml_entry_zone_low+ml_entry_zone_high)*0.5);
+    ObjectSetInteger(0,mid,OBJPROP_COLOR,poi_color);
+    ObjectSetInteger(0,mid,OBJPROP_STYLE,STYLE_DOT);
+    ObjectSetInteger(0,mid,OBJPROP_SELECTABLE,false);
+    ObjectSetInteger(0,mid,OBJPROP_HIDDEN,true);
+    string label=ml_poi_prefix+"LABEL";
+    string caption=StringFormat("NEXA ML POI %s | %s | %s",
+        ml_poi_direction,ml_confirmation_status,ml_entry_zone_source);
+    if(ObjectFind(0,label)<0) ObjectCreate(0,label,OBJ_TEXT,0,right,ml_entry_zone_high);
+    else ObjectMove(0,label,0,right,ml_entry_zone_high);
+    ObjectSetString(0,label,OBJPROP_TEXT,caption);
+    ObjectSetString(0,label,OBJPROP_FONT,FontMedium());
+    ObjectSetInteger(0,label,OBJPROP_FONTSIZE,8);
+    ObjectSetInteger(0,label,OBJPROP_COLOR,poi_color);
+    ObjectSetInteger(0,label,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+    ObjectSetInteger(0,label,OBJPROP_SELECTABLE,false);
+    ObjectSetInteger(0,label,OBJPROP_HIDDEN,true);
+    ChartRedraw();
 }
 void DrawAITab() {
     DrawSection("NEXA ML DECISION ENGINE",102);
@@ -610,26 +682,22 @@ void DrawLogsTab() {
     string live_zone_status=!accepted || !ml_entry_triggered?"WAITING":
         MLCurrentPriceInsideEntryZone()?"IN ZONE":"OUTSIDE ZONE";
     SetDashboardLabel("MLResponse",accepted?
-        StringFormat("H1 %s %s %.1f%% | EA mode %s",
-            ml_h1_setup_type,ml_h1_signal,ml_h1_confidence,active_trading_mode):
+        StringFormat("H1 BIAS %s | H1 MODEL %s",ml_trend_direction,ml_h1_model_version):
         "NO ACCEPTED PREDICTION | "+(ml_link_error!=""?ml_link_error:"Waiting for ML response"),
         28,133,9,accepted?DashGreen():DashRed(),FontMedium());
-    SetDashboardLabel("MLM15Signal",StringFormat("M15 %s %s %.1f%% | EA order %s",
-        ml_prediction_setup_type,ml_m15_signal,ml_m15_confidence,ml_prediction_signal),28,150,8,DashText());
-    SetDashboardLabel("MLH1Model","H1 model: "+ml_h1_model_version,28,167,8,DashMuted());
-    SetDashboardLabel("MLM15Model","M15 model: "+ml_m15_model_version,28,184,8,DashMuted());
-    SetDashboardLabel("MLClassProbabilities",StringFormat("H1 BIAS %s | M15 LEARNED SETUP %s %s %.1f%%",
-        ml_trend_direction,ml_prediction_setup_type,ml_m15_signal,ml_m15_confidence),28,201,8,DashText());
-    SetDashboardLabel("MLDirectionalProbabilities",StringFormat("CONFIRMATION %s | EA ENTRY %s",
-        ml_confirmation_status,ml_prediction_signal),28,218,8,DashText());
-    SetDashboardLabel("MLEntryPlan",StringFormat("ENTRY  plan %s | %s | candle trigger %s | live quote %s",
-        ml_planned_direction,ml_entry_status,ml_entry_triggered?"YES":"NO",live_zone_status),28,235,8,DashText());
-    SetDashboardLabel("MLEntryZone",StringFormat("ZONE  %s-%s | source %s",
+    SetDashboardLabel("MLM15Signal",StringFormat("M15 %s %s | model %s",
+        ml_m15_signal,ml_prediction_setup_type,ml_m15_model_version),28,150,8,DashText());
+    SetDashboardLabel("MLClassProbabilities",CompactMLText(StringFormat("TOP %s (%.3f) | NEXT %s (%.3f)",
+        ml_model_class,ml_model_class_probability,ml_runner_up_class,ml_runner_up_probability),70),28,167,8,DashText());
+    SetDashboardLabel("MLSetupReason",CompactMLText("WHY "+ml_setup_reason,70),28,184,8,DashText());
+    SetDashboardLabel("MLSetupContext",CompactMLText("H1 "+ml_trend_reason,70),28,201,8,DashMuted());
+    SetDashboardLabel("MLPOIReason",CompactMLText("M15 context "+ml_setup_context,70),28,218,8,DashMuted());
+    SetDashboardLabel("MLEntryZone",StringFormat("ZONE %s-%s | source %s",
         DoubleToString(ml_entry_zone_low,_Digits),DoubleToString(ml_entry_zone_high,_Digits),ml_entry_zone_source),
-        28,252,8,DashText());
-    SetDashboardLabel("MLEntryCandle",StringFormat("M15 candle %s-%s | reason %s",
-        DoubleToString(ml_entry_candle_low,_Digits),DoubleToString(ml_entry_candle_high,_Digits),
-        ml_prediction_reason),28,269,8,DashMuted());
+        28,235,8,DashText());
+    SetDashboardLabel("MLEntryPlan",CompactMLText("POI "+ml_poi_reason,70),28,252,8,DashAccent());
+    SetDashboardLabel("MLEntryCandle",StringFormat("ENTRY %s | %s | candle %s | quote %s",
+        ml_planned_direction,ml_entry_status,ml_entry_triggered?"TOUCHED":"WAIT",live_zone_status),28,269,8,DashText());
     DrawSection("LOGGING",294);
     DrawToggle("DebugLogs","DEBUG LOG",runtime_debug_logs,18,318); DrawToggle("IndicatorLogs","INDICATOR LOG",runtime_indicator_logs,154,318); DrawToggle("DecisionLogs","DECISION LOG",runtime_decision_logs,290,318,142);
     DrawSection("RECENT ML EVENTS",362);
@@ -1257,6 +1325,13 @@ void SetMLLinkState(MLLinkState state,int http_code,string detail) {
         if(runtime_debug_logs) Print("[NEXA][ML] ",MLLinkStateText()," | ",MLLinkDetailText());
     }
 }
+double ScalpGridSpacing(string direction) {
+    double configured=InpScalpGridIntervalPips*ScalpPipSize();
+    double learned_atr=direction=="BUY"?ml_grid_interval_buy_atr:ml_grid_interval_sell_atr;
+    if(learned_atr<=0 || ml_m15_atr<=0) return configured;
+    double learned=learned_atr*ml_m15_atr;
+    return MathMax(configured,MathMin(learned,configured*3.0));
+}
 //--- performs a genuine request; the dashboard only ever shows this result
 void PollMLService(bool force) {
     if(!InpUseMLService) { SetMLLinkState(ML_LINK_DISABLED,0,"Service check switched off"); return; }
@@ -1373,7 +1448,14 @@ bool AcceptMLPrediction(string body) {
     if(!ExtractMLJsonNumber(body,"confidence",confidence)) confidence=0;
     ExtractMLJsonString(body,"recommended_mode",ml_recommended_mode);
     ExtractMLJsonString(body,"trend_direction",ml_trend_direction);
+    ExtractMLJsonString(body,"trend_reason",ml_trend_reason);
     ExtractMLJsonString(body,"confirmation_status",ml_confirmation_status);
+    ExtractMLJsonString(body,"model_class",ml_model_class);
+    ExtractMLJsonString(body,"runner_up_class",ml_runner_up_class);
+    ExtractMLJsonString(body,"setup_reason",ml_setup_reason);
+    ExtractMLJsonString(body,"setup_context",ml_setup_context);
+    ExtractMLJsonString(body,"poi_direction",ml_poi_direction);
+    ExtractMLJsonString(body,"poi_reason",ml_poi_reason);
     ExtractMLJsonString(body,"entry_direction",ml_entry_direction);
     ExtractMLJsonString(body,"entry_status",ml_entry_status);
     ExtractMLJsonString(body,"entry_zone_source",ml_entry_zone_source);
@@ -1392,6 +1474,8 @@ bool AcceptMLPrediction(string body) {
     ExtractMLJsonString(body,"m15_model_version",ml_m15_model_version);
     ExtractMLJsonNumber(body,"h1_confidence",ml_h1_confidence);
     ExtractMLJsonNumber(body,"m15_confidence",ml_m15_confidence);
+    ExtractMLJsonNumber(body,"model_class_probability",ml_model_class_probability);
+    ExtractMLJsonNumber(body,"runner_up_probability",ml_runner_up_probability);
     ExtractMLJsonNumber(body,"m15_atr",ml_m15_atr);
     ExtractMLJsonNumber(body,"grid_interval_buy_atr",ml_grid_interval_buy_atr);
     ExtractMLJsonNumber(body,"grid_interval_sell_atr",ml_grid_interval_sell_atr);
@@ -1535,24 +1619,26 @@ bool AcceptMLPrediction(string body) {
     ml_prediction_model_version=model_version; ml_prediction_confidence=confidence;
     ml_prediction_buy_probability=buy; ml_prediction_sell_probability=sell; ml_prediction_time=TimeCurrent();
     ml_prediction_available=true;
-    AddMLDashboardLog(StringFormat("H1 %s/%s %.1f | M15 %s/%s %.1f | EA %s %.1f",
-        ml_h1_setup_type,ml_h1_signal,ml_h1_confidence,ml_prediction_setup_type,ml_m15_signal,
-        ml_m15_confidence,execution_signal,confidence));
-    AddMLDashboardLog(StringFormat("BIAS %s | M15 %s %s %.1f | CONFIRM %s",
-        ml_trend_direction,ml_prediction_setup_type,ml_m15_signal,ml_m15_confidence,ml_confirmation_status));
+    DrawMLPointOfInterest();
+    AddMLDashboardLog(StringFormat("MODEL %s %.3f > %s %.3f",
+        ml_model_class,ml_model_class_probability,ml_runner_up_class,ml_runner_up_probability));
+    AddMLDashboardLog("WHY "+ml_setup_reason);
+    AddMLDashboardLog("CONTEXT "+ml_setup_context);
+    AddMLDashboardLog("H1 TREND "+ml_trend_reason);
+    AddMLDashboardLog("POI "+ml_poi_reason);
     AddMLDashboardLog(StringFormat("ENTRY %s %s | %s | zone %.5f-%.5f | candle %.5f-%.5f",
         ml_planned_direction,ml_entry_status,ml_entry_triggered?"TOUCHED":"WAIT",
         ml_entry_zone_low,ml_entry_zone_high,ml_entry_candle_low,ml_entry_candle_high));
-    AddMLDashboardLog(StringFormat("REV LEVELS B %.5f-%.5f %s | S %.5f-%.5f %s",
-        ml_potential_bullish_reversal_low,ml_potential_bullish_reversal_high,ml_bullish_reversal_source,
-        ml_potential_bearish_reversal_low,ml_potential_bearish_reversal_high,ml_bearish_reversal_source));
-    AddMLDashboardLog(StringFormat("BREAKOUT up %.5f | down %.5f",ml_breakout_up,ml_breakout_down));
-    AddMLDashboardLog(StringFormat("CANDLES H1 %s | M15 %s",ml_h1_candle_time,ml_m15_candle_time));
     if(runtime_decision_logs)
           Print("[NEXA][ML] symbol=",_Symbol," H1 bias=",ml_trend_direction," (",ml_h1_setup_type,")",
               " | M15=",setup_type,"/",ml_m15_signal," confidence=",DoubleToString(confidence,1),
               " | confirmation=",ml_confirmation_status," | EA=",execution_signal,
               " reason=",signal_reason," | model=",model_version);
+    if(runtime_decision_logs)
+        Print("[NEXA][ML][WHY] H1 evidence=",ml_trend_reason," | top class=",ml_model_class,
+            " score=",DoubleToString(ml_model_class_probability,3)," runner-up=",ml_runner_up_class,
+            " score=",DoubleToString(ml_runner_up_probability,3)," | context=",ml_setup_context,
+            " | POI=",ml_poi_reason);
     if(runtime_decision_logs && ml_potential_bullish_reversal_high>0)
         Print("[NEXA][ML] potential bullish reversal reference=",DoubleToString(ml_potential_bullish_reversal_low,_Digits),"-",DoubleToString(ml_potential_bullish_reversal_high,_Digits)," source=",ml_bullish_reversal_source);
     if(runtime_decision_logs && ml_potential_bearish_reversal_high>0)
@@ -1614,11 +1700,16 @@ void ClearMLPrediction(string reason) {
     ml_potential_bullish_reversal_low=0; ml_potential_bullish_reversal_high=0;
     ml_potential_bearish_reversal_low=0; ml_potential_bearish_reversal_high=0;
     ml_entry_direction="WAIT"; ml_planned_direction="WAIT"; ml_entry_status=reason; ml_entry_zone_source="unavailable";
+    ml_poi_direction="NONE"; ml_setup_reason=reason; ml_setup_context="No current M15 setup context";
+    ml_poi_reason="No structural POI"; ml_trend_reason=reason;
+    ml_model_class="unknown"; ml_runner_up_class="unknown";
+    ml_model_class_probability=0; ml_runner_up_probability=0;
     ml_entry_triggered=false; ml_entry_price=0; ml_entry_zone_low=0; ml_entry_zone_high=0;
     ml_entry_candle_low=0; ml_entry_candle_high=0;
     ml_breakout_up=0; ml_breakout_down=0;
     ml_bullish_reversal_source="unavailable"; ml_bearish_reversal_source="unavailable";
     ml_h1_candle_time=""; ml_m15_candle_time="";
+    RemoveMLPointOfInterest();
     if(had_prediction) AddMLDashboardLog("Prediction cleared: "+reason);
 }
 bool UpdateMLPrediction() {
@@ -1731,7 +1822,7 @@ int OnInit() {
 //+------------------------------------------------------------------+
 void ReleaseHandle(int &handle) { if(handle!=INVALID_HANDLE){ IndicatorRelease(handle); handle=INVALID_HANDLE; } }
 void OnDeinit(const int reason) {
-    EventKillTimer(); WriteTelemetryHeartbeat("STOPPED"); RemoveDashboard();
+    EventKillTimer(); WriteTelemetryHeartbeat("STOPPED"); RemoveDashboard(); RemoveMLPointOfInterest();
     ReleaseHandle(rsi_handle); ReleaseHandle(ema_fast_handle); ReleaseHandle(ema_slow_handle); ReleaseHandle(ema_trend_handle); ReleaseHandle(htf_trend_handle); ReleaseHandle(atr_handle);
     ReleaseHandle(macd_handle); ReleaseHandle(adx_handle); ReleaseHandle(stochastic_handle); ReleaseHandle(bands_handle); ReleaseHandle(cci_handle); ReleaseHandle(wpr_handle);
     ReleaseHandle(momentum_handle); ReleaseHandle(obv_handle); ReleaseHandle(mfi_handle); ReleaseHandle(ichimoku_handle); ReleaseHandle(sar_handle);
@@ -1970,7 +2061,7 @@ bool GridAddIsDue(string direction) {
         found=true;
     }
     if(!found) return true;
-    double spacing=InpScalpGridIntervalPips*ScalpPipSize();
+    double spacing=ScalpGridSpacing(direction);
     double market_price=direction=="BUY"?SymbolInfoDouble(_Symbol,SYMBOL_BID):SymbolInfoDouble(_Symbol,SYMBOL_ASK);
     return direction=="BUY"?market_price<=anchor-spacing:market_price>=anchor+spacing;
 }
@@ -2022,7 +2113,9 @@ string ModeReadinessText() {
     if(!IsGoldSymbol()) return "PENDING  |  scalp is restricted to XAUUSD";
     if(!scalp_basket_tp_ready) return "PENDING  |  synchronizing common basket TP";
     if(CountEAOpenPositions()>=InpScalpMaxPositions) return "PENDING  |  scalp position limit reached";
-    if(!GridAddIsDue(ml_prediction_signal)) return "PENDING  |  waiting for ML add interval or matching basket direction";
+    if(!GridAddIsDue(ml_prediction_signal))
+        return StringFormat("PENDING  |  waiting for %s ML add interval %.2f",
+            ml_prediction_signal,ScalpGridSpacing(ml_prediction_signal));
     return "READY  |  XAUUSD ML entry/spacing and basket TP accepted";
 }
 
@@ -2699,6 +2792,7 @@ void OnTimer() {
     WriteTelemetryHeartbeat("ACTIVE");
     PollMLService(false);
     UpdateMLPrediction();
+    DrawMLPointOfInterest();
     string gate_status=ModeReadinessText();
     if(gate_status!=ml_last_gate_status) {
         ml_last_gate_status=gate_status;

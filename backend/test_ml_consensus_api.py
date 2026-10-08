@@ -44,6 +44,9 @@ class MlConsensusApiTests(unittest.TestCase):
             "probabilities": {"buy": 68.0, "sell": 12.0},
             "model_version": "gold_m15",
             "price": 100.0,
+            "atr": 0.5,
+            "grid_interval_buy_atr": 1.25,
+            "grid_interval_sell_atr": 1.5,
             "candle_low": 99.0,
             "candle_high": 101.0,
             "levels": {
@@ -101,6 +104,13 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["entry_status"], "ZONE_TOUCHED")
         self.assertEqual(result["entry_zone_low"], 99.5)
         self.assertEqual(result["entry_zone_high"], 100.5)
+        self.assertEqual(result["poi_direction"], "BUY")
+        self.assertIn("M15 top class breakout_buy", result["setup_reason"])
+        self.assertIn("runner-up unavailable", result["setup_reason"])
+        self.assertIn("demand_zone", result["poi_reason"])
+        self.assertIn("H1 trend BUY", result["decision_explanation"])
+        self.assertEqual(result["grid_interval_buy_atr"], 1.25)
+        self.assertEqual(result["grid_interval_sell_atr"], 1.5)
 
     def test_consensus_accepts_a_learned_m15_reversal_against_h1_bias(self):
         h1_result = deepcopy(self.h1_result)
@@ -156,6 +166,9 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["confirmation_status"], "WAIT_M15_CONFIRMATION")
         self.assertEqual(result["entry_status"], "WAIT_FOR_M15_CONFIRMATION")
         self.assertEqual(result["entry_direction"], "WAIT")
+        self.assertEqual(result["poi_direction"], "BUY")
+        self.assertGreater(result["entry_zone_low"], 0)
+        self.assertIn("no listed context cue", result["setup_context"])
 
     def test_consensus_uses_market_trend_when_h1_setup_classifier_returns_wait(self):
         h1_result = deepcopy(self.h1_result)
