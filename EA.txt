@@ -1,14 +1,14 @@
 //+------------------------------------------------------------------+
-//|                                    NEXA AI 2.33 |
+//|                                    NEXA AI 2.34 |
 //|                        Copyright 2024, MetaQuotes Software Corp. |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Software Corp."
 #property link      "https://www.mql5.com"
-#property version   "2.33"
-#property description "NEXA AI 2.33 - learned trend model and ML-only entries"
+#property version   "2.34"
+#property description "NEXA AI 2.34 - learned trend model and ML-only entries"
 
-#define NEXA_VERSION "2.33"
+#define NEXA_VERSION "2.34"
 #define EA_VERSION NEXA_VERSION
 #define DASHBOARD_VERSION NEXA_VERSION
 #define EA_MAGIC_NUMBER 123456
@@ -1439,7 +1439,6 @@ bool AcceptMLPrediction(string body) {
     ExtractMLJsonNumber(body,"breakout_up",ml_breakout_up);
     ExtractMLJsonNumber(body,"breakout_down",ml_breakout_down);
     if(signal!="BUY" && signal!="SELL" && signal!="WAIT") return false;
-    if(buy<0 || buy>100 || sell<0 || sell>100) return false;
     if(confidence<0 || confidence>100) confidence=0;
     bool direction_conflict=(signal=="BUY" || signal=="SELL")?
         (direction!=signal || planned_direction!=signal):
@@ -1810,7 +1809,7 @@ void SetToolState(int idx,double value,double secondary,SignalState state,double
 void UpdateIndicatorSignals() {
     ZeroMemory(current_signals); const int s=1; double v=0,v2=0,v3=0,close1=iClose(_Symbol,PERIOD_CURRENT,s),close2=iClose(_Symbol,PERIOD_CURRENT,s+1);
     if(ReadValue(atr_handle,0,s,v)){ current_signals.atr_value=v; SetToolState(IDX_ATR,v,0,SIGNAL_NEUTRAL,0.5); }
-    if(ReadValue(rsi_handle,0,s,v) && ReadValue(rsi_handle,0,s+1,v2)){ current_signals.rsi_value=v; SignalState st=v>v2&&v<InpRSIOverbought?SIGNAL_BULLISH:(v<v2&&v>InpRSIOversold?SIGNAL_BEARISH:SIGNAL_NEUTRAL); current_signals.rsi_bullish=st==SIGNAL_BULLISH; current_signals.rsi_bearish=st==SIGNAL_BEARISH; SetToolState(IDX_RSI,v,v2,st,MathMin(1.0,MathAbs(v-50.0)/50.0)); }
+    if(ReadValue(rsi_handle,0,s,v) && ReadValue(rsi_handle,0,s+1,v2)){ current_signals.rsi_value=v; SignalState st=v>v2&&v<InpRSIOverbought?SIGNAL_BULLISH:(v<v2&&v>InpRSIOversold?SIGNAL_BEARISH:SIGNAL_NEUTRAL); SetToolState(IDX_RSI,v,v2,st,MathMin(1.0,MathAbs(v-50.0)/50.0)); }
     if(ReadValue(macd_handle,0,s,v)&&ReadValue(macd_handle,1,s,v2)) SetToolState(IDX_MACD,v,v2,v>v2?SIGNAL_BULLISH:(v<v2?SIGNAL_BEARISH:SIGNAL_NEUTRAL),MathMin(1.0,MathAbs(v-v2)/(current_signals.atr_value+_Point)));
     double adx=0,pdi=0,mdi=0; if(ReadValue(adx_handle,0,s,adx)&&ReadValue(adx_handle,1,s,pdi)&&ReadValue(adx_handle,2,s,mdi)) SetToolState(IDX_ADX,adx,pdi-mdi,pdi>mdi?SIGNAL_BULLISH:(mdi>pdi?SIGNAL_BEARISH:SIGNAL_NEUTRAL),MathMin(1.0,adx/50.0));
     if(ReadValue(stochastic_handle,0,s,v)&&ReadValue(stochastic_handle,1,s,v2)) SetToolState(IDX_STOCHASTIC,v,v2,v>v2&&v<80?SIGNAL_BULLISH:(v<v2&&v>20?SIGNAL_BEARISH:SIGNAL_NEUTRAL),MathMin(1.0,MathAbs(v-v2)/25.0));
@@ -1845,7 +1844,6 @@ void CheckPriceActionSignals() {
     bool bear=(r[1].close>r[1].open&&r[0].close<r[0].open&&r[0].open>r[1].close&&r[0].close<r[1].open);
     double body=MathMax(_Point,MathAbs(r[0].close-r[0].open)),lower=MathMin(r[0].close,r[0].open)-r[0].low,upper=r[0].high-MathMax(r[0].close,r[0].open);
     bull=bull||(lower>body*2.0&&upper<body*0.5); bear=bear||(upper>body*2.0&&lower<body*0.5);
-    current_signals.price_action_bullish=bull; current_signals.price_action_bearish=bear;
     SetToolState(IDX_PRICE_ACTION,r[0].close,body,bull?SIGNAL_BULLISH:(bear?SIGNAL_BEARISH:SIGNAL_NEUTRAL),bull||bear?0.8:0);
 }
 //+------------------------------------------------------------------+
