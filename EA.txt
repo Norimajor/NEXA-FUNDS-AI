@@ -1,15 +1,18 @@
 //+------------------------------------------------------------------+
-//|                                    NEXA AI 1.8 |
+//|                                    NEXA AI 2.30 |
 //|                        Copyright 2024, MetaQuotes Software Corp. |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Software Corp."
 #property link      "https://www.mql5.com"
-#property version   "1.80"
-#property description "NEXA AI 1.8 - ML zone-triggered entries with consensus swing routing"
+#property version   "2.30"
+#property description "NEXA AI 2.30 - trend-led ML setup confirmation and execution guard"
 
-#define EA_VERSION "1.80"
+#define NEXA_VERSION "2.30"
+#define EA_VERSION NEXA_VERSION
+#define DASHBOARD_VERSION NEXA_VERSION
 #define EA_MAGIC_NUMBER 123456
+const double SCALP_MIN_ML_CONFIDENCE=60.0;
 
 #include <Object.mqh>
 #include <Trade\Trade.mqh>
@@ -138,7 +141,7 @@ input bool InpForceDataLoggingInTester = true;         // Always write ML datase
 input group "=== NEXA ML SERVICE CONNECTION ==="
 input bool InpUseMLService = true;                     // Check a real ML service endpoint
 const string ML_RENDER_BASE_URL = "https://nexa-funds-ai.onrender.com";
-input string InpMLApiKey = "";                          // Render INGEST_API_KEY sent as x-api-key
+input string InpMLApiKey = "";                         // Render INGEST_API_KEY sent as x-api-key
 input int InpMLTimeoutMs = 60000;                      // Allow for Render free-tier cold starts (milliseconds)
 input int InpMLCheckSeconds = 5;                       // Seconds between ML inference requests
 input double InpMLExecutionConfidence = 60.0;          // Minimum ML confidence required for execution
@@ -313,12 +316,14 @@ string pending_decision_id="";
 //--- live ML service link state, only ever set by a real request result
 MLLinkState ml_link_state=ML_LINK_DISABLED;
 int ml_link_http_code=0, ml_link_latency_ms=0;
-string ml_link_error="";
+string ml_link_error="", ml_last_gate_status="";
 datetime ml_link_last_attempt=0, ml_link_last_success=0;
 bool ml_prediction_available=false;
 string ml_prediction_signal="WAIT", ml_prediction_setup_type="no_model", ml_prediction_direction="NONE", ml_prediction_model_version="";
 string ml_prediction_reason="NO_PREDICTION", ml_bullish_reversal_source="unavailable", ml_bearish_reversal_source="unavailable";
 string ml_recommended_mode="WAIT", ml_h1_signal="WAIT", ml_m15_signal="WAIT", ml_h1_setup_type="unknown";
+string ml_trend_direction="NONE", ml_confirmation_status="NO_TREND_DIRECTION";
+string ml_h1_model_version="unknown", ml_m15_model_version="unknown";
 string ml_h1_candle_time="", ml_m15_candle_time="";
 string ml_entry_direction="WAIT", ml_planned_direction="WAIT", ml_entry_status="NO_ENTRY_DATA", ml_entry_zone_source="unavailable";
 bool ml_entry_triggered=false;
@@ -363,6 +368,7 @@ bool UpdateMLPrediction();
 void AddMLDashboardLog(string message);
 bool GridAddIsDue(string direction);
 bool IsGoldSymbol();
+bool MLCurrentPriceInsideEntryZone();
 int CountEAOpenPositions();
 string ModeReadinessText();
 string MLHeaders();
@@ -380,7 +386,10 @@ string MLStateText() {
     if(ml_config_state==ML_CONFIG_INVALID) return "INVALID";
     return "OFFLINE";
 }
-int DS(int value) { return (int)MathRound(value*(double)dashboard_scale/100.0); }
+// At 100% scale this is about 284 px, or 7.5 cm on a 96-DPI display.
+const double DASHBOARD_WIDTH_FACTOR=0.63;
+double DashboardScaleFactor() { return DASHBOARD_WIDTH_FACTOR*(double)dashboard_scale/100.0; }
+int DS(int value) { return (int)MathRound(value*DashboardScaleFactor()); }
 
 //--- central theme engine: one accent drives every themed element ---
 color ThemeAccentFor(int theme) {
@@ -422,9 +431,9 @@ color DashAccentFill()  { return MixColor(DashAccent(),DashPanel(),0.20); }
 color DashOnAccent()    { return C'15,16,18'; }
 color ChartBackground() { return (color)ChartGetInteger(0,CHART_COLOR_BACKGROUND); }
 //--- shared typography
-string FontRegular()    { return "Segoe UI Bold"; }
-string FontMedium()     { return "Segoe UI Bold"; }
-string FontNumeric()    { return "Segoe UI Bold"; }
+string FontRegular()    { return "Segoe UI"; }
+string FontMedium()     { return "Segoe UI Semibold"; }
+string FontNumeric()    { return "Consolas"; }
 
 string DashName(string name) { return dashboard_prefix+name; }
 void SetObjectVisible(string name,bool visible) { if(ObjectFind(0,DashName(name))>=0) ObjectSetInteger(0,DashName(name),OBJPROP_TIMEFRAMES,visible?OBJ_ALL_PERIODS:OBJ_NO_PERIODS); }
@@ -440,9 +449,10 @@ void RawRect(string name,int px,int py,int w,int h,color bg,int zorder) {
 }
 //--- MT5 objects are square, so the corners are masked with the surrounding colour
 void RoundCorners(string base,int px,int py,int pw,int ph,color outer,int radius,int zorder) {
-    int r=MathMax(0,MathMin(14,radius));
+    int r=MathMax(0,MathMin(18,radius));
     for(int i=0;i<r;i++) {
-        int len=r-i;
+        double row_distance=(double)(r-i);
+        int len=(int)MathCeil((double)r-MathSqrt((double)(r*r)-row_distance*row_distance));
         RawRect("RC_"+base+"_TL"+IntegerToString(i),px,py+i,len,1,outer,zorder);
         RawRect("RC_"+base+"_TR"+IntegerToString(i),px+pw-len,py+i,len,1,outer,zorder);
         RawRect("RC_"+base+"_BL"+IntegerToString(i),px,py+ph-1-i,len,1,outer,zorder);
@@ -452,34 +462,37 @@ void RoundCorners(string base,int px,int py,int pw,int ph,color outer,int radius
 void SetDashboardLabel(string name,string text,int x,int y,int font_size,color text_color,string font="") {
     string n=DashName(name); if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_LABEL,0,0,0);
     ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner); ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
-    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y)); ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(7,DS(font_size)));
+    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y)); ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(6,DS(font_size)));
     ObjectSetInteger(0,n,OBJPROP_COLOR,text_color); ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
     ObjectSetString(0,n,OBJPROP_FONT,font==""?FontRegular():font); ObjectSetString(0,n,OBJPROP_TEXT,text);
     ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false); ObjectSetInteger(0,n,OBJPROP_HIDDEN,true); ObjectSetInteger(0,n,OBJPROP_ZORDER,14);
 }
 void SetDashboardPanel(string name,int x,int y,int width,int height,color bg,color border,bool draggable=false) {
-    string n=DashName(name); if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_RECTANGLE_LABEL,0,0,0);
+    string n=DashName(name); bool created=ObjectFind(0,n)<0;
+    if(created) ObjectCreate(0,n,OBJ_RECTANGLE_LABEL,0,0,0);
     ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner); ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x)); ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y));
     ObjectSetInteger(0,n,OBJPROP_XSIZE,DS(width)); ObjectSetInteger(0,n,OBJPROP_YSIZE,DS(height));
     ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg);
     //--- rectangle labels take their border colour from OBJPROP_COLOR with a flat border
     ObjectSetInteger(0,n,OBJPROP_BORDER_TYPE,BORDER_FLAT); ObjectSetInteger(0,n,OBJPROP_COLOR,border);
-    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,draggable); ObjectSetInteger(0,n,OBJPROP_SELECTED,false); ObjectSetInteger(0,n,OBJPROP_HIDDEN,!draggable); ObjectSetInteger(0,n,OBJPROP_ZORDER,draggable?2:0);
+    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,draggable);
+    if(created) ObjectSetInteger(0,n,OBJPROP_SELECTED,false);
+    ObjectSetInteger(0,n,OBJPROP_HIDDEN,!draggable); ObjectSetInteger(0,n,OBJPROP_ZORDER,draggable?2:0);
 }
 //--- panel with masked (rounded) corners
 void SetRoundedPanel(string name,int x,int y,int width,int height,color bg,color border,color outer,int radius=3,bool draggable=false) {
     SetDashboardPanel(name,x,y,width,height,bg,border,draggable);
-    RoundCorners(name,dashboard_x+DS(x),dashboard_y+DS(y),DS(width),DS(height),outer,MathMax(radius,8),draggable?3:1);
+    RoundCorners(name,dashboard_x+DS(x),dashboard_y+DS(y),DS(width),DS(height),outer,MathMax(DS(radius),DS(16)),draggable?3:1);
 }
 void SetDashboardButton(string name,string text,int x,int y,int width,int height,color bg,color border,color text_color=clrWhite,color outer=clrNONE,int radius=2) {
     string n=DashName(name); if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_BUTTON,0,0,0);
     ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner); ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
     ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y)); ObjectSetInteger(0,n,OBJPROP_XSIZE,DS(width)); ObjectSetInteger(0,n,OBJPROP_YSIZE,DS(height));
-    ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(7,DS(8))); ObjectSetInteger(0,n,OBJPROP_COLOR,text_color);
+    ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(6,DS(8))); ObjectSetInteger(0,n,OBJPROP_COLOR,text_color);
     ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg); ObjectSetInteger(0,n,OBJPROP_BORDER_COLOR,bg);
     ObjectSetString(0,n,OBJPROP_FONT,FontMedium()); ObjectSetString(0,n,OBJPROP_TEXT,text);
     ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false); ObjectSetInteger(0,n,OBJPROP_HIDDEN,true); ObjectSetInteger(0,n,OBJPROP_ZORDER,10);
-    RoundCorners(name,dashboard_x+DS(x),dashboard_y+DS(y),DS(width),DS(height),outer==clrNONE?DashBg():outer,MathMax(radius,6),12);
+    RoundCorners(name,dashboard_x+DS(x),dashboard_y+DS(y),DS(width),DS(height),outer==clrNONE?DashBg():outer,MathMax(DS(radius),DS(10)),12);
 }
 void DrawSection(string title,int y) {
     SetDashboardPanel("SBAR_"+title,16,y+2,3,12,DashAccent(),DashAccent());
@@ -538,8 +551,8 @@ void DrawStrategyTab() {
     SetDashboardButton("ModeScalp","SCALP",290,202,142,28,runtime_operating_mode==NEXA_SCALP?DashAccent():DashCard(),DashAccent(),runtime_operating_mode==NEXA_SCALP?DashOnAccent():DashMuted());
     DrawSection("MODE CONDITIONS",250);
     SetRoundedPanel("ModeConditions",18,274,414,132,DashCard(),DashBorderSoft(),DashBg(),3);
-    SetDashboardLabel("SwingCondition",StringFormat("SWING  AUTO: server agrees H1/M15 + confidence >= %.0f%%",runtime_ml_execution_confidence),28,284,8,DashText());
-    SetDashboardLabel("ScalpCondition",StringFormat("SCALP  higher ML side; TP %.0f pips; add every %.0f pips; x%.2f; max %.2f lots/order",InpScalpTakeProfitPips,InpScalpGridIntervalPips,InpScalpLotMultiplier,0.10),28,306,8,DashText());
+    SetDashboardLabel("SwingCondition",StringFormat("SWING  AUTO: H1 direction + learned M15 setup/reversal; confidence >= %.0f%%",runtime_ml_execution_confidence),28,284,8,DashText());
+    SetDashboardLabel("ScalpCondition",StringFormat("SCALP  ML confidence >= %.0f%%; TP %.0f pips; add every %.0f pips; x%.2f; max %.2f lots/order",MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence),InpScalpTakeProfitPips,InpScalpGridIntervalPips,InpScalpLotMultiplier,0.10),28,306,8,DashText());
     SetDashboardLabel("ModeStatus",ModeReadinessText(),28,334,10,StringFind(ModeReadinessText(),"READY")==0?DashGreen():DashAccent(),FontMedium());
     SetDashboardLabel("ModeReason",StringFormat("H1 %s/%s  |  M15 %s  %.0f%%  |  %s",ml_h1_setup_type,ml_h1_signal,ml_m15_signal,ml_m15_confidence,ml_prediction_reason),28,359,8,DashMuted());
     SetDashboardLabel("ModeExecution",StringFormat("XAU pip = $%.2f  |  TP $%.2f  |  add $%.2f adverse",ScalpPipSize(),InpScalpTakeProfitPips*ScalpPipSize(),InpScalpGridIntervalPips*ScalpPipSize()),28,380,8,DashMuted());
@@ -576,7 +589,8 @@ void DrawAITab() {
     DrawToggle("Adaptive","ADAPTIVE CONFIG",runtime_adaptive_enabled,18,170,190);
     SetDashboardLabel("AIMode",StringFormat("%s | %s",runtime_ml_enabled?"NEXA ML":"Entries paused",active_trading_mode),220,175,10,runtime_ml_enabled?DashGreen():DashAccent(),FontMedium());
     SetDashboardLabel("AIStatus",StringFormat("Adaptive status %s  |  configuration %s",MLStateText(),UsingAdaptiveConfiguration()?"ADAPTIVE":"BASE"),18,204,9,DashText());
-    SetDashboardLabel("AIRule",StringFormat("ML-only direction/setup  |  %s  |  %s",OperatingModeText(),ModeReadinessText()),18,226,9,DashMuted());
+    SetDashboardLabel("AIRule",StringFormat("H1 bias %s | M15 %s | %s",ml_trend_direction,ml_m15_signal,ml_confirmation_status),18,226,8,DashMuted());
+    SetDashboardLabel("AIReadiness",ModeReadinessText(),18,240,7,DashMuted());
     DrawSection("EXECUTION CONFIDENCE",256);
     SetDashboardButton("ConfidenceMinus","-",18,280,32,25,DashPanel(),DashBorder(),DashAccent());
     SetDashboardLabel("ConfidenceValue",StringFormat("%.0f%% minimum",runtime_ml_execution_confidence),66,285,10,DashText(),FontNumeric());
@@ -591,19 +605,40 @@ void DrawAITab() {
 }
 void DrawLogsTab() {
     DrawSection("ML RESPONSE",102);
-    SetRoundedPanel("MLResponseCard",18,126,414,58,DashCard(),DashBorderSoft(),DashBg(),3);
-    string latest=ml_prediction_available?StringFormat("%s %s %.1f%% | %s: %s",ml_prediction_setup_type,ml_prediction_direction,ml_prediction_confidence,ml_prediction_signal,ml_prediction_reason):"NO ACCEPTED PREDICTION";
-    SetDashboardLabel("MLResponse",latest,28,136,10,ml_prediction_available?DashGreen():DashRed(),FontMedium());
-    SetDashboardLabel("MLModel",ml_prediction_available?"Model: "+ml_prediction_model_version:(ml_link_error!=""?ml_link_error:"No accepted prediction"),28,158,8,DashMuted());
-    DrawSection("LOGGING",202);
-    DrawToggle("DebugLogs","DEBUG LOG",runtime_debug_logs,18,230); DrawToggle("IndicatorLogs","INDICATOR LOG",runtime_indicator_logs,154,230); DrawToggle("DecisionLogs","DECISION LOG",runtime_decision_logs,290,230,142);
-    DrawSection("RECENT ML EVENTS",286);
-    SetRoundedPanel("MLLogCard",18,308,414,96,DashCard(),DashBorderSoft(),DashBg(),3);
+    SetRoundedPanel("MLResponseCard",18,126,414,160,DashCard(),DashBorderSoft(),DashBg(),3);
+    bool accepted=ml_prediction_available;
+    string live_zone_status=!accepted || !ml_entry_triggered?"WAITING":
+        MLCurrentPriceInsideEntryZone()?"IN ZONE":"OUTSIDE ZONE";
+    SetDashboardLabel("MLResponse",accepted?
+        StringFormat("H1 %s %s %.1f%% | EA mode %s",
+            ml_h1_setup_type,ml_h1_signal,ml_h1_confidence,active_trading_mode):
+        "NO ACCEPTED PREDICTION | "+(ml_link_error!=""?ml_link_error:"Waiting for ML response"),
+        28,133,9,accepted?DashGreen():DashRed(),FontMedium());
+    SetDashboardLabel("MLM15Signal",StringFormat("M15 %s %s %.1f%% | EA order %s",
+        ml_prediction_setup_type,ml_m15_signal,ml_m15_confidence,ml_prediction_signal),28,150,8,DashText());
+    SetDashboardLabel("MLH1Model","H1 model: "+ml_h1_model_version,28,167,8,DashMuted());
+    SetDashboardLabel("MLM15Model","M15 model: "+ml_m15_model_version,28,184,8,DashMuted());
+    SetDashboardLabel("MLClassProbabilities",StringFormat("H1 BIAS %s | M15 LEARNED SETUP %s %s %.1f%%",
+        ml_trend_direction,ml_prediction_setup_type,ml_m15_signal,ml_m15_confidence),28,201,8,DashText());
+    SetDashboardLabel("MLDirectionalProbabilities",StringFormat("CONFIRMATION %s | EA ENTRY %s",
+        ml_confirmation_status,ml_prediction_signal),28,218,8,DashText());
+    SetDashboardLabel("MLEntryPlan",StringFormat("ENTRY  plan %s | %s | candle trigger %s | live quote %s",
+        ml_planned_direction,ml_entry_status,ml_entry_triggered?"YES":"NO",live_zone_status),28,235,8,DashText());
+    SetDashboardLabel("MLEntryZone",StringFormat("ZONE  %s-%s | source %s",
+        DoubleToString(ml_entry_zone_low,_Digits),DoubleToString(ml_entry_zone_high,_Digits),ml_entry_zone_source),
+        28,252,8,DashText());
+    SetDashboardLabel("MLEntryCandle",StringFormat("M15 candle %s-%s | reason %s",
+        DoubleToString(ml_entry_candle_low,_Digits),DoubleToString(ml_entry_candle_high,_Digits),
+        ml_prediction_reason),28,269,8,DashMuted());
+    DrawSection("LOGGING",294);
+    DrawToggle("DebugLogs","DEBUG LOG",runtime_debug_logs,18,318); DrawToggle("IndicatorLogs","INDICATOR LOG",runtime_indicator_logs,154,318); DrawToggle("DecisionLogs","DECISION LOG",runtime_decision_logs,290,318,142);
+    DrawSection("RECENT ML EVENTS",362);
+    SetRoundedPanel("MLLogCard",18,384,414,96,DashCard(),DashBorderSoft(),DashBg(),3);
     int count=ArraySize(ml_dashboard_logs);
-    for(int row=0;row<6;row++) {
+    for(int row=0;row<7;row++) {
         int index=count-1-row; string line=index>=0?ml_dashboard_logs[index]:"";
-        if(StringLen(line)>68) line=StringSubstr(line,0,65)+"...";
-        SetDashboardLabel("MLLog"+IntegerToString(row),line,28,316+row*14,8,row==0?DashText():DashMuted());
+        if(StringLen(line)>58) line=StringSubstr(line,0,55)+"...";
+        SetDashboardLabel("MLLog"+IntegerToString(row),line,28,390+row*13,8,row==0?DashText():DashMuted(),FontNumeric());
     }
 }
 void DrawSettingsTab() {
@@ -625,21 +660,35 @@ void CreateDashboard() {
     SetRoundedPanel("Frame",0,0,450,h,DashBg(),DashBorder(),ChartBackground(),8);
     SetRoundedPanel("DragHandle",1,1,448,45,DashPanel(),DashBorderSoft(),DashBg(),6,true);
     SetDashboardPanel("HeaderLine",1,46,448,1,DashAccent(),DashAccent());
-    SetDashboardLabel("Brand","NEXA AI 1.8",16,11,14,DashAccent(),FontMedium());
-    SetDashboardLabel("Version","DASHBOARD 1.6",128,16,8,DashMuted(),FontMedium());
+    SetDashboardLabel("Brand",StringFormat("NEXA AI %s",NEXA_VERSION),16,11,14,DashAccent(),FontMedium());
+    SetDashboardLabel("Version",StringFormat("DASHBOARD %s",DASHBOARD_VERSION),128,16,8,DashMuted(),FontMedium());
     bool active=runtime_trading_enabled;
     color state_color=active?DashGreen():DashRed();
     SetRoundedPanel("StatusPill",296,12,92,22,MixColor(state_color,DashPanel(),0.16),state_color,DashPanel(),3);
     SetDashboardLabel("Status",active?"ACTIVE":"STOPPED",312,16,9,state_color,FontMedium());
     SetDashboardButton("MinTop",dashboard_minimized?"+":"-",406,11,30,23,DashPanel(),DashBorder(),DashAccent(),DashPanel(),2);
-    if(dashboard_minimized)return; DrawTabs();
+    if(dashboard_minimized) {
+        RoundCorners("Frame",dashboard_x,dashboard_y,DS(450),DS(h),ChartBackground(),DS(24),30);
+        return;
+    }
+    DrawTabs();
     if(dashboard_tab==0)DrawTradeTab(); else if(dashboard_tab==1)DrawStrategyTab(); else if(dashboard_tab==2)DrawInfoTab(); else if(dashboard_tab==3)DrawNewsTab(); else if(dashboard_tab==4)DrawAITab(); else if(dashboard_tab==5)DrawLogsTab(); else DrawSettingsTab();
     SetDashboardPanel("FooterLine",14,508,422,1,DashBorderSoft(),DashBorderSoft());
     SetDashboardLabel("Footer",StringFormat("SERVER  %s  |  %s",TimeToString(TimeCurrent(),TIME_DATE),TimeToString(TimeCurrent(),TIME_SECONDS)),18,516,8,DashMuted());
     SetDashboardLabel("FooterState",MLLinkStateText(),330,516,8,MLLinkColor());
+    RoundCorners("Frame",dashboard_x,dashboard_y,DS(450),DS(h),ChartBackground(),DS(24),30);
 }
 void RenderDashboard() { if(!InpShowDashboard)return; RemoveDashboard(); CreateDashboard(); ChartRedraw(); }
-void UpdateDashboard() { RenderDashboard(); }
+void UpdateDashboard() {
+    if(!InpShowDashboard)return;
+    string drag_handle=DashName("DragHandle");
+    if(ObjectFind(0,drag_handle)>=0 && ObjectGetInteger(0,drag_handle,OBJPROP_SELECTED)) {
+        ChartRedraw();
+        return;
+    }
+    CreateDashboard();
+    ChartRedraw();
+}
 void RemoveDashboard() { for(int i=ObjectsTotal(0)-1;i>=0;i--){ string n=ObjectName(0,i); if(StringFind(n,dashboard_prefix)==0)ObjectDelete(0,n); } }
 
 //+------------------------------------------------------------------+
@@ -729,11 +778,20 @@ int DecisionScopeCode() {
     hash=(hash*31+(ulong)_Period)%10000;
     return (int)hash;
 }
+string Base36Code(int value,int width) {
+    const string digits="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    string code="";
+    for(int i=0;i<width;i++) {
+        code=StringSubstr(digits,value%36,1)+code;
+        value/=36;
+    }
+    return code;
+}
 string NewDecisionId() {
     static int seq=0;
-    seq++;
-    // Format: N<server_time>-<account/symbol/timeframe scope>-<tick>-<local sequence>
-    return "N"+IntegerToString((int)TimeCurrent())+"-"+IntegerToString(DecisionScopeCode())+"-"+IntegerToString((int)(GetTickCount()%100000))+"-"+IntegerToString(seq%1000);
+    seq=(seq+1)%46656;
+    // Compact enough for the broker comment while retaining time and scope.
+    return "N"+IntegerToString((int)TimeCurrent())+"-"+Base36Code(DecisionScopeCode(),3)+"-"+Base36Code(seq,3);
 }
 bool IsTesterRun() { return (bool)MQLInfoInteger(MQL_TESTER) || (bool)MQLInfoInteger(MQL_OPTIMIZATION) || (bool)MQLInfoInteger(MQL_VISUAL_MODE); }
 string RunContext() {
@@ -1007,6 +1065,10 @@ void UpdateScalpBasketTakeProfit() {
 }
 
 string DecisionIdFromComment(string comment,ulong position_id) {
+    if(StringFind(comment,"NEXA AI-")==0) {
+        string id=StringSubstr(comment,8);
+        if(id!="") return id;
+    }
     if(StringFind(comment,"NXA-")==0) {
         string id=StringSubstr(comment,4);
         if(id!="") return id;
@@ -1110,7 +1172,7 @@ bool WriteTelemetryHeartbeat(string status) {
         return false;
     }
 
-    string ea_name = "NEXA AI 1.8";
+    string ea_name = StringFormat("NEXA AI %s",NEXA_VERSION);
     string magic_number = IntegerToString(EA_MAGIC_NUMBER);
     string account_login = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
     string timestamp = TelemetryTimestamp(now);
@@ -1168,7 +1230,7 @@ string MLLinkStateText() {
 string MLLinkDetailText() {
     if(ml_link_state==ML_LINK_DISABLED)       return ml_link_error!=""?ml_link_error:"Service check switched off";
     if(ml_link_state==ML_LINK_NOT_CONFIGURED) return "Endpoint not set";
-    if(ml_link_state==ML_LINK_CONNECTED)      return ml_prediction_available?StringFormat("HTTP 200 | %s %.1f%% | buy %.1f sell %.1f",ml_prediction_signal,ml_prediction_confidence,ml_prediction_buy_probability,ml_prediction_sell_probability):StringFormat("HTTP 200 | %d ms",ml_link_latency_ms);
+    if(ml_link_state==ML_LINK_CONNECTED)      return ml_prediction_available?StringFormat("HTTP 200 | H1 %s | M15 %s | %s",ml_trend_direction,ml_m15_signal,ml_confirmation_status):StringFormat("HTTP 200 | %d ms",ml_link_latency_ms);
     if(ml_link_state==ML_LINK_HTTP_ERROR)     return StringFormat("HTTP %d | %s",ml_link_http_code,ml_link_error);
     if(ml_link_state==ML_LINK_TIMEOUT)        return StringFormat("Timeout after %d ms",InpMLTimeoutMs);
     return ml_link_error!=""?ml_link_error:"No detail available";
@@ -1183,7 +1245,7 @@ string MLLinkLastAttemptText() {
 }
 void AddMLDashboardLog(string message) {
     int count=ArraySize(ml_dashboard_logs);
-    if(count>=8) { for(int i=0;i<count-1;i++) ml_dashboard_logs[i]=ml_dashboard_logs[i+1]; count--; ArrayResize(ml_dashboard_logs,count); }
+    if(count>=32) { for(int i=0;i<count-1;i++) ml_dashboard_logs[i]=ml_dashboard_logs[i+1]; count--; ArrayResize(ml_dashboard_logs,count); }
     ArrayResize(ml_dashboard_logs,count+1);
     ml_dashboard_logs[count]=TimeToString(TimeCurrent(),TIME_SECONDS)+" | "+message;
 }
@@ -1299,15 +1361,19 @@ string OperatingModeText() {
 }
 bool AcceptMLPrediction(string body) {
     string signal="",model_version="",channel_bias="",setup_type="unknown",direction="NONE",signal_reason="UNKNOWN";
+    string planned_direction="NONE";
     double confidence=0,buy=0,sell=0;
     if(!ExtractMLJsonString(body,"signal",signal) || !ExtractMLJsonString(body,"model_version",model_version)) return false;
     ExtractMLJsonString(body,"setup_type",setup_type);
     if(!ExtractMLJsonString(body,"direction",direction)) direction=(signal=="BUY"||signal=="SELL")?signal:"NONE";
+    if(!ExtractMLJsonString(body,"planned_direction",planned_direction)) planned_direction=signal;
+    ml_planned_direction=planned_direction;
     ExtractMLJsonString(body,"signal_reason",signal_reason);
     if(!ExtractMLJsonString(body,"channel_bias",channel_bias)) channel_bias="NONE";
     if(!ExtractMLJsonNumber(body,"confidence",confidence)) confidence=0;
     ExtractMLJsonString(body,"recommended_mode",ml_recommended_mode);
-    ExtractMLJsonString(body,"planned_direction",ml_planned_direction);
+    ExtractMLJsonString(body,"trend_direction",ml_trend_direction);
+    ExtractMLJsonString(body,"confirmation_status",ml_confirmation_status);
     ExtractMLJsonString(body,"entry_direction",ml_entry_direction);
     ExtractMLJsonString(body,"entry_status",ml_entry_status);
     ExtractMLJsonString(body,"entry_zone_source",ml_entry_zone_source);
@@ -1322,6 +1388,8 @@ bool AcceptMLPrediction(string body) {
     ExtractMLJsonString(body,"h1_signal",ml_h1_signal);
     ExtractMLJsonString(body,"m15_signal",ml_m15_signal);
     ExtractMLJsonString(body,"h1_setup_type",ml_h1_setup_type);
+    ExtractMLJsonString(body,"h1_model_version",ml_h1_model_version);
+    ExtractMLJsonString(body,"m15_model_version",ml_m15_model_version);
     ExtractMLJsonNumber(body,"h1_confidence",ml_h1_confidence);
     ExtractMLJsonNumber(body,"m15_confidence",ml_m15_confidence);
     ExtractMLJsonNumber(body,"m15_atr",ml_m15_atr);
@@ -1361,53 +1429,85 @@ bool AcceptMLPrediction(string body) {
     if(signal!="BUY" && signal!="SELL" && signal!="WAIT") return false;
     if(buy<0 || buy>100 || sell<0 || sell>100) return false;
     if(confidence<0 || confidence>100) confidence=0;
+    bool direction_conflict=(signal=="BUY" || signal=="SELL")?
+        (direction!=signal || planned_direction!=signal):
+        (direction=="BUY" || direction=="SELL" || planned_direction=="BUY" || planned_direction=="SELL");
     string selected_mode=ml_recommended_mode;
-    string selected_signal=signal;
+    string selected_signal="WAIT";
+    bool learned_setup_confirmed=
+        ml_confirmation_status=="DIRECTION_CONFIRMED" ||
+        ml_confirmation_status=="REVERSAL_CONFIRMED";
+    bool server_setup_valid=ml_recommended_mode=="SWING" && learned_setup_confirmed &&
+        (signal=="BUY" || signal=="SELL") && direction==signal && planned_direction==signal;
     if(runtime_operating_mode==NEXA_SWING) {
-        selected_mode="SWING";
-        selected_signal=(ml_h1_signal==ml_m15_signal && ml_h1_signal!="WAIT" &&
-                         (ml_h1_setup_type=="continuation" || ml_h1_setup_type=="breakout" ||
-                          (ml_h1_setup_type=="reversal" && setup_type=="reversal")))?ml_m15_signal:"WAIT";
+        selected_mode=server_setup_valid?"SWING":"WAIT";
+        selected_signal=server_setup_valid?signal:"WAIT";
         confidence=MathMin(ml_m15_confidence,ml_h1_confidence);
     } else if(runtime_operating_mode==NEXA_SCALP) {
-        selected_mode=IsGoldSymbol()?"SCALP":"WAIT";
-        selected_signal=IsGoldSymbol()?(buy>sell?"BUY":(sell>buy?"SELL":"WAIT")):"WAIT";
+        selected_mode=IsGoldSymbol() && server_setup_valid?"SCALP":"WAIT";
+        selected_signal=selected_mode=="SCALP"?signal:"WAIT";
         confidence=ml_m15_confidence;
         if(selected_mode=="SCALP")
-            signal_reason=buy>sell?"ML_BUY_PROBABILITY_HIGHER":(sell>buy?"ML_SELL_PROBABILITY_HIGHER":"ML_NO_DIRECTIONAL_PROBABILITY_EDGE");
+            signal_reason=signal=="BUY"?"ML_SIGNAL_BUY":(signal=="SELL"?"ML_SIGNAL_SELL":"ML_NO_DIRECTIONAL_SIGNAL");
         else
-            signal_reason="ML_SCALP_REQUIRES_GOLD_SYMBOL";
+            signal_reason=IsGoldSymbol()?"ML_SETUP_UNCONFIRMED":"ML_SCALP_REQUIRES_GOLD_SYMBOL";
     } else {
-        bool swing_direction_agrees=ml_h1_signal==ml_m15_signal && ml_h1_signal!="WAIT" &&
-            (ml_h1_setup_type=="continuation" || ml_h1_setup_type=="breakout" ||
-             (ml_h1_setup_type=="reversal" && setup_type=="reversal"));
         double swing_confidence=MathMin(ml_m15_confidence,ml_h1_confidence);
-        double swing_stop_atr=ml_h1_signal=="BUY"?ml_swing_stop_buy_atr:ml_swing_stop_sell_atr;
-        double swing_target_atr=ml_h1_signal=="BUY"?ml_swing_target_buy_atr:ml_swing_target_sell_atr;
-        bool swing_threshold_met=ml_recommended_mode=="SWING" && swing_direction_agrees &&
+        double swing_stop_atr=signal=="BUY"?ml_swing_stop_buy_atr:ml_swing_stop_sell_atr;
+        double swing_target_atr=signal=="BUY"?ml_swing_target_buy_atr:ml_swing_target_sell_atr;
+        bool swing_threshold_met=server_setup_valid &&
             swing_confidence>=runtime_ml_execution_confidence && ml_m15_atr>0 &&
             swing_stop_atr>0 && swing_target_atr>swing_stop_atr;
         if(swing_threshold_met) {
             selected_mode="SWING";
-            selected_signal=ml_m15_signal;
+            selected_signal=signal;
             confidence=swing_confidence;
         } else {
-            selected_mode=IsGoldSymbol()?"SCALP":"WAIT";
-            selected_signal=IsGoldSymbol()?(buy>sell?"BUY":(sell>buy?"SELL":"WAIT")):"WAIT";
-            confidence=ml_m15_confidence;
-            if(selected_mode=="SCALP")
-                signal_reason=buy>sell?"ML_BUY_PROBABILITY_HIGHER":(sell>buy?"ML_SELL_PROBABILITY_HIGHER":"ML_NO_DIRECTIONAL_PROBABILITY_EDGE");
-            else
-                signal_reason="ML_SCALP_REQUIRES_GOLD_SYMBOL";
+            selected_mode="WAIT";
+            selected_signal="WAIT";
+            signal_reason=server_setup_valid?"ML_SWING_CONFIRMATION_OR_RISK_GATE":"ML_SETUP_UNCONFIRMED";
         }
     }
+    if(direction_conflict) {
+        selected_mode="WAIT";
+        selected_signal="WAIT";
+        signal_reason="ML_DIRECTION_FIELDS_CONFLICT";
+    }
+    double scalp_confidence_required=MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence);
+    if(selected_mode=="SCALP" && (selected_signal=="BUY" || selected_signal=="SELL") &&
+       confidence<scalp_confidence_required)
+        signal_reason=StringFormat("SCALP_CONFIDENCE_BELOW_%.0f",scalp_confidence_required);
     bool swing_setup_selected=selected_mode=="SWING" &&
         (selected_signal=="BUY" || selected_signal=="SELL");
-    if((ml_planned_direction=="BUY" || ml_planned_direction=="SELL") &&
-       (selected_mode!="SWING" || swing_setup_selected))
-        selected_signal=ml_planned_direction;
-    else
+    if(selected_mode=="SCALP") {
+        if(selected_signal=="BUY" || selected_signal=="SELL") {
+            bool buy_side=selected_signal=="BUY";
+            double fallback_low=buy_side?ml_potential_bullish_reversal_low:ml_potential_bearish_reversal_low;
+            double fallback_high=buy_side?ml_potential_bullish_reversal_high:ml_potential_bearish_reversal_high;
+            if(ml_entry_zone_low<=0 || ml_entry_zone_high<ml_entry_zone_low) {
+                ml_entry_zone_low=fallback_low;
+                ml_entry_zone_high=fallback_high;
+                ml_entry_price=(fallback_low>0 && fallback_high>=fallback_low)?(fallback_low+fallback_high)*0.5:0;
+                ml_entry_zone_source=buy_side?ml_bullish_reversal_source:ml_bearish_reversal_source;
+            }
+            bool valid_scalp_zone=ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low;
+            bool valid_scalp_candle=ml_entry_candle_low>0 && ml_entry_candle_high>=ml_entry_candle_low;
+            ml_entry_triggered=valid_scalp_zone && valid_scalp_candle &&
+                ml_entry_candle_low<=ml_entry_zone_high && ml_entry_candle_high>=ml_entry_zone_low;
+            ml_planned_direction=selected_signal;
+            ml_entry_direction=ml_entry_triggered?selected_signal:"WAIT";
+            ml_entry_status=ml_entry_triggered?"ZONE_TOUCHED":valid_scalp_zone?"WAIT_FOR_ZONE":"NO_ENTRY_ZONE";
+        } else {
+            ml_planned_direction="WAIT";
+            ml_entry_direction="WAIT";
+            ml_entry_triggered=false;
+            ml_entry_status="NO_DIRECTIONAL_EDGE";
+        }
+    } else if(swing_setup_selected) {
+        ml_planned_direction=selected_signal;
+    } else {
         selected_signal="WAIT";
+    }
     double selected_stop_atr=selected_signal=="BUY"?ml_swing_stop_buy_atr:ml_swing_stop_sell_atr;
     double selected_target_atr=selected_signal=="BUY"?ml_swing_target_buy_atr:ml_swing_target_sell_atr;
     if(selected_mode=="SWING" && (ml_m15_atr<=0 || selected_stop_atr<=0 || selected_target_atr<=selected_stop_atr)) {
@@ -1417,10 +1517,11 @@ bool AcceptMLPrediction(string body) {
     if(selected_mode!="SWING" && selected_mode!="SCALP") selected_mode="WAIT";
     bool scalp_direction_selected=selected_mode=="SCALP" &&
         (selected_signal=="BUY" || selected_signal=="SELL");
+    bool scalp_confidence_met=confidence>=scalp_confidence_required;
     bool existing_scalp_grid=selected_mode=="SCALP" && CountEAOpenPositions()>0;
     bool entry_level_ready=ml_entry_triggered || existing_scalp_grid;
     string execution_signal=(selected_signal=="BUY"||selected_signal=="SELL") &&
-        ((scalp_direction_selected && entry_level_ready) ||
+        ((scalp_direction_selected && scalp_confidence_met && entry_level_ready) ||
          (selected_mode=="SWING" && confidence>=runtime_ml_execution_confidence && ml_entry_triggered))?
         selected_signal:"WAIT";
     if(selected_signal!="BUY" && selected_signal!="SELL") selected_mode="WAIT";
@@ -1430,28 +1531,24 @@ bool AcceptMLPrediction(string body) {
     ml_prediction_model_version=model_version; ml_prediction_confidence=confidence;
     ml_prediction_buy_probability=buy; ml_prediction_sell_probability=sell; ml_prediction_time=TimeCurrent();
     ml_prediction_available=true;
-    AddMLDashboardLog(StringFormat("%s H1 %s/%s | M15 %s %.1f%% | EA %s",active_trading_mode,ml_h1_setup_type,ml_h1_signal,ml_m15_signal,confidence,execution_signal));
-    AddMLDashboardLog(StringFormat("REV %.1f CONT %.1f BRK %.1f FAIL %.1f NONE %.1f%%",ml_probability_reversal*100,ml_probability_continuation*100,ml_probability_breakout*100,ml_probability_failed_breakout*100,ml_probability_no_edge*100));
-    AddMLDashboardLog(StringFormat("REV B/S %.1f/%.1f | CONT B/S %.1f/%.1f%%",ml_probability_reversal_buy*100,ml_probability_reversal_sell*100,ml_probability_continuation_buy*100,ml_probability_continuation_sell*100));
-    AddMLDashboardLog(StringFormat("BRK B/S %.1f/%.1f | FAILED B/S %.1f/%.1f%%",ml_probability_breakout_buy*100,ml_probability_breakout_sell*100,ml_probability_failed_breakout_buy*100,ml_probability_failed_breakout_sell*100));
-    AddMLDashboardLog(StringFormat("%s H1 %s | M15 %s",_Symbol,ml_h1_candle_time,ml_m15_candle_time));
-    AddMLDashboardLog(StringFormat("BUY %.1f%% SELL %.1f%% | model %s",buy,sell,model_version));
-    AddMLDashboardLog(StringFormat("ENTRY %s | plan %s | execute %s | zone %.5f-%.5f mid %.5f (%s) | candle %.5f-%.5f",
-        ml_entry_status,ml_planned_direction,ml_entry_direction,ml_entry_zone_low,ml_entry_zone_high,ml_entry_price,
-        ml_entry_zone_source,ml_entry_candle_low,ml_entry_candle_high));
-    if(ml_potential_bullish_reversal_high>0)
-        AddMLDashboardLog(StringFormat("Bull reversal ref %.5f-%.5f (%s)",ml_potential_bullish_reversal_low,ml_potential_bullish_reversal_high,ml_bullish_reversal_source));
-    if(ml_potential_bearish_reversal_high>0)
-        AddMLDashboardLog(StringFormat("Bear reversal ref %.5f-%.5f (%s)",ml_potential_bearish_reversal_low,ml_potential_bearish_reversal_high,ml_bearish_reversal_source));
-    if(ml_breakout_up>0 || ml_breakout_down>0)
-        AddMLDashboardLog(StringFormat("Break refs up %.5f / down %.5f",ml_breakout_up,ml_breakout_down));
+    AddMLDashboardLog(StringFormat("H1 %s/%s %.1f | M15 %s/%s %.1f | EA %s %.1f",
+        ml_h1_setup_type,ml_h1_signal,ml_h1_confidence,ml_prediction_setup_type,ml_m15_signal,
+        ml_m15_confidence,execution_signal,confidence));
+    AddMLDashboardLog(StringFormat("BIAS %s | M15 %s %s %.1f | CONFIRM %s",
+        ml_trend_direction,ml_prediction_setup_type,ml_m15_signal,ml_m15_confidence,ml_confirmation_status));
+    AddMLDashboardLog(StringFormat("ENTRY %s %s | %s | zone %.5f-%.5f | candle %.5f-%.5f",
+        ml_planned_direction,ml_entry_status,ml_entry_triggered?"TOUCHED":"WAIT",
+        ml_entry_zone_low,ml_entry_zone_high,ml_entry_candle_low,ml_entry_candle_high));
+    AddMLDashboardLog(StringFormat("REV LEVELS B %.5f-%.5f %s | S %.5f-%.5f %s",
+        ml_potential_bullish_reversal_low,ml_potential_bullish_reversal_high,ml_bullish_reversal_source,
+        ml_potential_bearish_reversal_low,ml_potential_bearish_reversal_high,ml_bearish_reversal_source));
+    AddMLDashboardLog(StringFormat("BREAKOUT up %.5f | down %.5f",ml_breakout_up,ml_breakout_down));
+    AddMLDashboardLog(StringFormat("CANDLES H1 %s | M15 %s",ml_h1_candle_time,ml_m15_candle_time));
     if(runtime_decision_logs)
-          Print("[NEXA][ML] symbol=",_Symbol," H1=",ml_h1_candle_time," M15=",ml_m15_candle_time,
-              " top_class=",setup_type,"/",direction," ",DoubleToString(confidence,1),"% | EA=",execution_signal," reason=",signal_reason,
-              " | REV=",DoubleToString(ml_probability_reversal*100,1)," CONT=",DoubleToString(ml_probability_continuation*100,1),
-              " BRK=",DoubleToString(ml_probability_breakout*100,1)," FAILED_BRK=",DoubleToString(ml_probability_failed_breakout*100,1),
-              " NO_EDGE=",DoubleToString(ml_probability_no_edge*100,1)," | BUY=",DoubleToString(buy,1)," SELL=",DoubleToString(sell,1),
-              " | model=",model_version);
+          Print("[NEXA][ML] symbol=",_Symbol," H1 bias=",ml_trend_direction," (",ml_h1_setup_type,")",
+              " | M15=",setup_type,"/",ml_m15_signal," confidence=",DoubleToString(confidence,1),
+              " | confirmation=",ml_confirmation_status," | EA=",execution_signal,
+              " reason=",signal_reason," | model=",model_version);
     if(runtime_decision_logs && ml_potential_bullish_reversal_high>0)
         Print("[NEXA][ML] potential bullish reversal reference=",DoubleToString(ml_potential_bullish_reversal_low,_Digits),"-",DoubleToString(ml_potential_bullish_reversal_high,_Digits)," source=",ml_bullish_reversal_source);
     if(runtime_decision_logs && ml_potential_bearish_reversal_high>0)
@@ -1465,9 +1562,10 @@ bool AcceptMLPrediction(string body) {
             DoubleToString(ml_entry_zone_high,_Digits)," level=",DoubleToString(ml_entry_price,_Digits),
             " source=",ml_entry_zone_source," candle=",DoubleToString(ml_entry_candle_low,_Digits),"-",
             DoubleToString(ml_entry_candle_high,_Digits)," execution=",execution_signal);
-    Print("[NEXA][ML][OBS] model=",model_version," setup=",setup_type,"/",direction,
-        " confidence=",DoubleToString(confidence,1),"% BUY=",DoubleToString(buy,1),
-        "% SELL=",DoubleToString(sell,1),"% planned=",ml_planned_direction,
+    Print("[NEXA][ML][OBS] model=",model_version," H1 bias=",ml_trend_direction,
+        " M15 setup=",setup_type,"/",ml_m15_signal,
+        " confidence=",DoubleToString(confidence,1),"% confirmation=",ml_confirmation_status,
+        " planned=",ml_planned_direction,
         " entry=",ml_entry_status," zone=",DoubleToString(ml_entry_zone_low,_Digits),"-",
         DoubleToString(ml_entry_zone_high,_Digits)," candle=",DoubleToString(ml_entry_candle_low,_Digits),"-",
         DoubleToString(ml_entry_candle_high,_Digits)," triggered=",ml_entry_triggered,
@@ -1488,7 +1586,8 @@ bool RequestMLPrediction() {
     }
     string prediction_body=CharArrayToString(response,0,ArraySize(response));
     if(!AcceptMLPrediction(prediction_body)) { SetMLLinkState(ML_LINK_HTTP_ERROR,status,"Invalid ML prediction response"); return false; }
-    ml_link_latency_ms=elapsed; ml_link_last_success=TimeCurrent(); SetMLLinkState(ML_LINK_CONNECTED,status,StringFormat("HTTP %d | %d ms | %s %.1f%%",status,elapsed,ml_prediction_signal,ml_prediction_confidence));
+    ml_link_latency_ms=elapsed; ml_link_last_success=TimeCurrent();     SetMLLinkState(ML_LINK_CONNECTED,status,StringFormat("HTTP %d | %d ms | H1 %s | M15 %s | %s",
+        status,elapsed,ml_trend_direction,ml_m15_signal,ml_confirmation_status));
     return true;
 }
 void ClearMLPrediction(string reason) {
@@ -1499,7 +1598,9 @@ void ClearMLPrediction(string reason) {
     ml_prediction_buy_probability=0; ml_prediction_sell_probability=0; ml_prediction_time=0;
     ml_h1_confidence=0; ml_m15_confidence=0; ml_m15_atr=0; ml_grid_interval_buy_atr=0; ml_grid_interval_sell_atr=0;
     ml_swing_stop_buy_atr=0; ml_swing_target_buy_atr=0; ml_swing_stop_sell_atr=0; ml_swing_target_sell_atr=0;
-    ml_recommended_mode="WAIT"; ml_h1_signal="WAIT"; ml_m15_signal="WAIT"; ml_h1_setup_type="unknown"; active_trading_mode="WAIT";
+    ml_recommended_mode="WAIT"; ml_h1_signal="WAIT"; ml_m15_signal="WAIT"; ml_h1_setup_type="unknown";
+    ml_trend_direction="NONE"; ml_confirmation_status="NO_TREND_DIRECTION";
+    ml_h1_model_version="unknown"; ml_m15_model_version="unknown"; active_trading_mode="WAIT";
     ml_probability_reversal=0; ml_probability_continuation=0; ml_probability_breakout=0;
     ml_probability_failed_breakout=0; ml_probability_no_edge=0;
     ml_probability_reversal_buy=0; ml_probability_reversal_sell=0;
@@ -1606,7 +1707,7 @@ int OnInit() {
     runtime_session_start=InpSessionStartHour; runtime_session_end=InpSessionEndHour; runtime_trade_asian=InpTradeAsian; runtime_trade_london=InpTradeLondon; runtime_trade_new_york=InpTradeNewYork;
     runtime_confirmations=InpMinConfirmations; dashboard_x=InpDashboardX; dashboard_y=InpDashboardY; dashboard_scale=MathMax(75,MathMin(150,InpDashboardScale)); dashboard_theme=(int)InpDashboardTheme;
     InitializeToolRegistry(); ResetToBaseConfiguration();
-    if(runtime_debug_logs) Print("NEXA AI 1.8 ML-READY initializing...");
+    if(runtime_debug_logs) Print("NEXA AI ",NEXA_VERSION," ML-READY initializing...");
     if(!ValidateInputs()) return INIT_PARAMETERS_INCORRECT;
     if(!InitializeIndicators()) return INIT_FAILED;
     ArrayResize(active_trades,0); ArrayResize(closed_trades,0); ArrayResize(identified_zones,0);
@@ -1630,7 +1731,7 @@ void OnDeinit(const int reason) {
     ReleaseHandle(rsi_handle); ReleaseHandle(ema_fast_handle); ReleaseHandle(ema_slow_handle); ReleaseHandle(ema_trend_handle); ReleaseHandle(htf_trend_handle); ReleaseHandle(atr_handle);
     ReleaseHandle(macd_handle); ReleaseHandle(adx_handle); ReleaseHandle(stochastic_handle); ReleaseHandle(bands_handle); ReleaseHandle(cci_handle); ReleaseHandle(wpr_handle);
     ReleaseHandle(momentum_handle); ReleaseHandle(obv_handle); ReleaseHandle(mfi_handle); ReleaseHandle(ichimoku_handle); ReleaseHandle(sar_handle);
-    if(runtime_debug_logs) Print("NEXA AI 1.8 stopped");
+    if(runtime_debug_logs) Print("NEXA AI ",NEXA_VERSION," stopped");
 }
 
 //+------------------------------------------------------------------+
@@ -1871,8 +1972,9 @@ bool GridAddIsDue(string direction) {
 }
 bool MLCurrentPriceInsideEntryZone() {
     if(!ml_entry_triggered || ml_entry_zone_low<=0 || ml_entry_zone_high<ml_entry_zone_low) return false;
-    double executable_price=ml_prediction_signal=="BUY"?SymbolInfoDouble(_Symbol,SYMBOL_ASK):
-        ml_prediction_signal=="SELL"?SymbolInfoDouble(_Symbol,SYMBOL_BID):0;
+    if(ml_planned_direction!="BUY" && ml_planned_direction!="SELL") return false;
+    double executable_price=ml_planned_direction=="BUY"?SymbolInfoDouble(_Symbol,SYMBOL_ASK):
+        SymbolInfoDouble(_Symbol,SYMBOL_BID);
     return executable_price>=ml_entry_zone_low && executable_price<=ml_entry_zone_high;
 }
 string ModeReadinessText() {
@@ -1882,9 +1984,18 @@ string ModeReadinessText() {
     if(!ml_prediction_available) return "PENDING  |  waiting for a fresh ML prediction";
     if(active_trading_mode!="SWING" && active_trading_mode!="SCALP")
         return "PENDING  |  "+(ml_prediction_reason!=""?ml_prediction_reason:"no valid ML setup");
-    if(CountEAOpenPositions()==0 && !MLCurrentPriceInsideEntryZone())
-        return "PENDING  |  ML "+ml_entry_status+" zone "+
+    if(active_trading_mode=="SCALP" &&
+       ml_prediction_confidence<MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence))
+        return StringFormat("PENDING  |  scalp confidence %.1f%% below %.0f%% minimum",
+            ml_prediction_confidence,MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence));
+    if(active_trading_mode=="SWING" && ml_prediction_confidence<runtime_ml_execution_confidence)
+        return StringFormat("PENDING  |  setup confidence %.1f%% below %.0f%% minimum",
+            ml_prediction_confidence,runtime_ml_execution_confidence);
+    if(CountEAOpenPositions()==0 && !MLCurrentPriceInsideEntryZone()) {
+        string entry_wait=ml_entry_triggered?"candle touched; live quote outside zone":ml_entry_status;
+        return "PENDING  |  ML "+entry_wait+" "+
             DoubleToString(ml_entry_zone_low,_Digits)+"-"+DoubleToString(ml_entry_zone_high,_Digits);
+    }
     if((ml_prediction_signal=="BUY" && !runtime_buy_enabled) || (ml_prediction_signal=="SELL" && !runtime_sell_enabled))
         return "PENDING  |  selected direction is disabled";
     if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) return "PENDING  |  terminal/account trading permission";
@@ -2013,11 +2124,26 @@ void CheckForHighProbabilitySetups() {
 //+------------------------------------------------------------------+
 void ExecuteHighProbabilityTrade(ENUM_ORDER_TYPE trade_type,int signal_strength,string trade_source) {
     if((trade_type==ORDER_TYPE_BUY&&!runtime_buy_enabled)||(trade_type==ORDER_TYPE_SELL&&!runtime_sell_enabled)||!runtime_new_trades_enabled)return;
+    if(runtime_ml_enabled) {
+        string requested_side=trade_type==ORDER_TYPE_BUY?"BUY":"SELL";
+        if(!ml_prediction_available || ml_prediction_signal!=requested_side ||
+           ml_prediction_direction!=requested_side || ml_planned_direction!=requested_side) {
+            Print("[NEXA][ERROR] Blocked ML direction mismatch | requested=",requested_side,
+                " signal=",ml_prediction_signal," direction=",ml_prediction_direction,
+                " planned=",ml_planned_direction," source=",trade_source);
+            return;
+        }
+    }
     double entry_price=trade_type==ORDER_TYPE_BUY?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID),stop_loss=0,take_profit=0;
     CalculateStopLossAndTakeProfit(trade_type,entry_price,stop_loss,take_profit);
     double lot_size=IsScalpMode()?CalculateScalpLotSize():CalculateLotSize(entry_price,stop_loss);
     if(lot_size<=0||(!IsScalpMode()&&stop_loss<=0)||take_profit<=0){ Print("Invalid order parameters for ",active_trading_mode," mode"); return; }
-    if(pending_decision_id=="") pending_decision_id=NewDecisionId(); string comment="NXA-"+pending_decision_id; if(StringLen(comment)>31)comment=StringSubstr(comment,0,31);
+    if(pending_decision_id=="") pending_decision_id=NewDecisionId();
+    string comment="NEXA AI-"+pending_decision_id;
+    if(StringLen(comment)>31) {
+        Print("[NEXA][ERROR] Generated trade comment exceeds the 31-character broker limit.");
+        return;
+    }
     if(stage_direction=="" || stage_direction!=(trade_type==ORDER_TYPE_BUY?"BUY":"SELL"))
         StageDecisionContext(trade_type==ORDER_TYPE_BUY?"BUY":"SELL",trade_source,stage_bull,stage_bear,signal_strength);
     WriteDecisionRecord(pending_decision_id,"ENTRY_REQUEST",trade_type==ORDER_TYPE_BUY?"BUY":"SELL",trade_source,entry_price,stop_loss,take_profit,lot_size,stage_bull,stage_bear,"",signal_strength);
@@ -2038,16 +2164,10 @@ void ExecuteHighProbabilityTrade(ENUM_ORDER_TYPE trade_type,int signal_strength,
               " fill=",DoubleToString(fill_price,_Digits)," SL=",DoubleToString(stop_loss,_Digits)," TP=",DoubleToString(take_profit,_Digits));
           AddMLDashboardLog(StringFormat("TRADE FILLED %s @ %s | SL %s TP %s",executed_side,DoubleToString(fill_price,_Digits),DoubleToString(stop_loss,_Digits),DoubleToString(take_profit,_Digits)));
           if(runtime_ml_enabled && ml_prediction_available) {
-            Print("[NEXA][TRADE][ML] top_class=",ml_prediction_setup_type,"/",ml_prediction_direction,
-                " score=",DoubleToString(ml_prediction_confidence,1),"% EA_signal=",ml_prediction_signal,
-                " reason=",ml_prediction_reason," model=",ml_prediction_model_version);
-            Print("[NEXA][TRADE][ML] REV=",DoubleToString(ml_probability_reversal*100,1),
-                " CONT=",DoubleToString(ml_probability_continuation*100,1)," BRK=",DoubleToString(ml_probability_breakout*100,1),
-                " FAILED_BRK=",DoubleToString(ml_probability_failed_breakout*100,1)," NO_EDGE=",DoubleToString(ml_probability_no_edge*100,1),"%");
-            Print("[NEXA][TRADE][ML] REV B/S=",DoubleToString(ml_probability_reversal_buy*100,1),"/",DoubleToString(ml_probability_reversal_sell*100,1),
-                " CONT B/S=",DoubleToString(ml_probability_continuation_buy*100,1),"/",DoubleToString(ml_probability_continuation_sell*100,1),
-                " BRK B/S=",DoubleToString(ml_probability_breakout_buy*100,1),"/",DoubleToString(ml_probability_breakout_sell*100,1),
-                " FAILED B/S=",DoubleToString(ml_probability_failed_breakout_buy*100,1),"/",DoubleToString(ml_probability_failed_breakout_sell*100,1),"%");
+            Print("[NEXA][TRADE][ML] H1 bias=",ml_trend_direction,
+                " M15 setup=",ml_prediction_setup_type,"/",ml_m15_signal,
+                " confirmation=",ml_confirmation_status," entry=",ml_entry_status,
+                " model=",ml_prediction_model_version);
             if(ml_potential_bullish_reversal_high>0 || ml_potential_bearish_reversal_high>0)
                 Print("[NEXA][TRADE][ML] reversal_refs bull=",DoubleToString(ml_potential_bullish_reversal_low,_Digits),"-",DoubleToString(ml_potential_bullish_reversal_high,_Digits),
                     " (",ml_bullish_reversal_source,") bear=",DoubleToString(ml_potential_bearish_reversal_low,_Digits),"-",DoubleToString(ml_potential_bearish_reversal_high,_Digits),
@@ -2422,7 +2542,7 @@ void UpdateSupplyDemandZones() {
             zone.is_supply = true;
             zone.has_coc = false;
             zone.awaiting_retracement = false;
-            zone.strength = InpZoneStrength;
+            zone.strength = (int)MathRound(InpZoneStrength);
             zone.touch_count = 0;
             
             AddZoneToArray(zone);
@@ -2447,7 +2567,7 @@ void UpdateSupplyDemandZones() {
             zone.is_supply = false;
             zone.has_coc = false;
             zone.awaiting_retracement = false;
-            zone.strength = InpZoneStrength;
+            zone.strength = (int)MathRound(InpZoneStrength);
             zone.touch_count = 0;
             
             AddZoneToArray(zone);
@@ -2575,6 +2695,11 @@ void OnTimer() {
     WriteTelemetryHeartbeat("ACTIVE");
     PollMLService(false);
     UpdateMLPrediction();
+    string gate_status=ModeReadinessText();
+    if(gate_status!=ml_last_gate_status) {
+        ml_last_gate_status=gate_status;
+        AddMLDashboardLog("EXECUTION GATE | "+gate_status);
+    }
     datetime now=TimeCurrent();
     if(last_ml_communication_log<=0 || now-last_ml_communication_log>=60) {
         last_ml_communication_log=now;
@@ -2602,6 +2727,10 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
     if(id==CHARTEVENT_OBJECT_DRAG && sparam==DashName("DragHandle")){
         dashboard_x=(int)ObjectGetInteger(0,sparam,OBJPROP_XDISTANCE)-DS(1); dashboard_y=(int)ObjectGetInteger(0,sparam,OBJPROP_YDISTANCE)-DS(1);
         Print("[NEXA][DASHBOARD] Moved to x=",dashboard_x," y=",dashboard_y); RenderDashboard(); return;
+    }
+    if(id==CHARTEVENT_OBJECT_CLICK && sparam==DashName("DragHandle")) {
+        ObjectSetInteger(0,sparam,OBJPROP_SELECTED,false);
+        return;
     }
     if(id!=CHARTEVENT_OBJECT_CLICK)return; string key=StringSubstr(sparam,StringLen(dashboard_prefix));
     if(StringFind(key,"TAB")==0){dashboard_tab=(int)StringToInteger(StringSubstr(key,3));RenderDashboard();return;}

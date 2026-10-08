@@ -230,9 +230,9 @@ class SignalApiTests(unittest.TestCase):
         self.assertEqual(result["direction"], "BUY")
         self.assertEqual(result["confidence"], 68.0)
         self.assertEqual(result["setup_type"], "breakout")
-        self.assertEqual(result["signal_reason"], "H1_M15_AGREE")
+        self.assertEqual(result["signal_reason"], "H1_M15_DIRECTION_CONFIRMED")
 
-    def test_ml_consensus_returns_wait_when_timeframes_disagree(self):
+    def test_ml_consensus_accepts_an_m15_reversal_against_h1_bias(self):
         now = datetime.now(timezone.utc)
         candles = [{
             "timestamp": (now + timedelta(minutes=index)).isoformat(),
@@ -263,12 +263,13 @@ class SignalApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
-        self.assertEqual(result["signal"], "WAIT")
-        self.assertEqual(result["direction"], "NONE")
-        self.assertEqual(result["confidence"], 0.0)
-        self.assertEqual(result["signal_reason"], "H1_M15_DISAGREE_OR_WAIT")
+        self.assertEqual(result["signal"], "SELL")
+        self.assertEqual(result["direction"], "SELL")
+        self.assertEqual(result["trend_direction"], "BUY")
+        self.assertEqual(result["confirmation_status"], "REVERSAL_CONFIRMED")
+        self.assertEqual(result["signal_reason"], "M15_REVERSAL_CONFIRMED")
 
-    def test_ml_consensus_selects_gold_scalp_and_returns_grid_interval(self):
+    def test_ml_consensus_does_not_trade_m15_signal_without_h1_direction(self):
         now = datetime.now(timezone.utc)
         candles = [{
             "timestamp": (now + timedelta(minutes=index)).isoformat(),
@@ -302,8 +303,11 @@ class SignalApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
-        self.assertEqual(result["recommended_mode"], "SCALP")
-        self.assertEqual(result["signal"], "BUY")
+        self.assertEqual(result["recommended_mode"], "WAIT")
+        self.assertEqual(result["signal"], "WAIT")
+        self.assertEqual(result["planned_direction"], "WAIT")
+        self.assertEqual(result["confirmation_status"], "NO_TREND_DIRECTION")
+        self.assertEqual(result["entry_status"], "NO_TREND_DIRECTION")
         self.assertEqual(result["h1_signal"], "WAIT")
         self.assertEqual(result["m15_signal"], "BUY")
         self.assertEqual(result["m15_atr"], 2.0)
@@ -349,7 +353,7 @@ class SignalApiTests(unittest.TestCase):
         result = response.json()
         self.assertEqual(result["recommended_mode"], "SWING")
         self.assertEqual(result["signal"], "SELL")
-        self.assertEqual(result["signal_reason"], "H1_M15_REVERSAL_AGREE")
+        self.assertEqual(result["signal_reason"], "H1_M15_DIRECTION_CONFIRMED")
 
     def test_ml_predict_endpoint_preserves_probability_scale(self):
         now = datetime.now(timezone.utc)

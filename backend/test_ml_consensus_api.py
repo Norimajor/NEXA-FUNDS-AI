@@ -86,7 +86,9 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["signal"], "BUY")
         self.assertEqual(result["direction"], "BUY")
         self.assertEqual(result["recommended_mode"], "SWING")
-        self.assertEqual(result["signal_reason"], "H1_M15_AGREE")
+        self.assertEqual(result["signal_reason"], "H1_M15_DIRECTION_CONFIRMED")
+        self.assertEqual(result["trend_direction"], "BUY")
+        self.assertEqual(result["confirmation_status"], "DIRECTION_CONFIRMED")
         self.assertEqual(result["confidence"], 68.0)
         self.assertEqual(result["setup_type"], "breakout")
         self.assertEqual(result["h1_model_version"], "gold_h1")
@@ -99,6 +101,61 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["entry_status"], "ZONE_TOUCHED")
         self.assertEqual(result["entry_zone_low"], 99.5)
         self.assertEqual(result["entry_zone_high"], 100.5)
+
+    def test_consensus_accepts_a_learned_m15_reversal_against_h1_bias(self):
+        h1_result = deepcopy(self.h1_result)
+        m15_result = deepcopy(self.m15_result)
+        h1_result.update(signal="BUY", direction="BUY", setup_type="continuation")
+        m15_result.update(
+            signal="SELL",
+            direction="SELL",
+            setup_type="reversal",
+            confidence=66.0,
+        )
+        m15_result["candle_low"] = 99.0
+        m15_result["candle_high"] = 100.0
+
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[h1_result, m15_result],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=self.payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["trend_direction"], "BUY")
+        self.assertEqual(result["planned_direction"], "SELL")
+        self.assertEqual(result["signal"], "SELL")
+        self.assertEqual(result["confirmation_status"], "REVERSAL_CONFIRMED")
+        self.assertEqual(result["signal_reason"], "M15_REVERSAL_CONFIRMED")
+        self.assertEqual(result["entry_direction"], "WAIT")
+        self.assertEqual(result["entry_status"], "WAIT_FOR_ZONE")
+
+    def test_consensus_waits_for_m15_learned_confirmation(self):
+        m15_result = deepcopy(self.m15_result)
+        m15_result.update(signal="WAIT", direction="BUY", confidence=58.0)
+
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[self.h1_result, m15_result],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=self.payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["trend_direction"], "BUY")
+        self.assertEqual(result["planned_direction"], "WAIT")
+        self.assertEqual(result["confirmation_status"], "WAIT_M15_CONFIRMATION")
+        self.assertEqual(result["entry_status"], "WAIT_FOR_M15_CONFIRMATION")
+        self.assertEqual(result["entry_direction"], "WAIT")
 
     def test_consensus_waits_until_latest_candle_touches_entry_zone(self):
         m15_result = deepcopy(self.m15_result)

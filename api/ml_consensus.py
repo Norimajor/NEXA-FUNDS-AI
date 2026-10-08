@@ -92,31 +92,50 @@ def ml_predict_consensus_endpoint(
     m15_signal = m15.get("signal", "WAIT")
     h1_setup = h1.get("setup_type", "unknown")
     m15_setup = m15.get("setup_type", "unknown")
-    m15_direction = m15.get("direction", "NONE")
-    if m15_direction not in {"BUY", "SELL"}:
-        m15_direction = m15_signal if m15_signal in {"BUY", "SELL"} else "NONE"
-    swing_ready = (
-        h1_signal in {"BUY", "SELL"}
-        and h1_signal == m15_signal
-        and (
-            h1_setup in {"continuation", "breakout"}
-            or (h1_setup == "reversal" and m15_setup == "reversal")
-        )
+    h1_has_learned_setup = h1_setup in {
+        "continuation",
+        "breakout",
+        "reversal",
+        "failed_breakout",
+    }
+    h1_direction = h1.get("direction", h1_signal)
+    if (
+        h1_direction not in {"BUY", "SELL"}
+        or h1_signal != h1_direction
+        or not h1_has_learned_setup
+    ):
+        h1_direction = "NONE"
+    m15_direction = m15.get("direction", m15_signal)
+    if m15_direction not in {"BUY", "SELL"} or m15_signal != m15_direction:
+        m15_direction = "NONE"
+    m15_has_learned_setup = m15_setup in {
+        "continuation",
+        "breakout",
+        "reversal",
+        "failed_breakout",
+    }
+    direction_confirmed = (
+        h1_direction in {"BUY", "SELL"}
+        and m15_direction == h1_direction
+        and m15_has_learned_setup
     )
-    normalized_symbol = batch.symbol.upper()
-    is_gold_symbol = "XAUUSD" in normalized_symbol or "GOLD" in normalized_symbol
-    scalp_ready = (
-        is_gold_symbol
-        and h1_setup == "no_edge"
+    reversal_confirmed = (
+        h1_direction in {"BUY", "SELL"}
         and m15_direction in {"BUY", "SELL"}
+        and m15_direction != h1_direction
+        and m15_setup in {"reversal", "failed_breakout"}
     )
-    recommended_mode = "SWING" if swing_ready else "SCALP" if scalp_ready else "WAIT"
-    signal = (
-        m15_signal if recommended_mode == "SWING"
-        else m15_direction if recommended_mode == "SCALP"
-        else "WAIT"
+    setup_confirmed = direction_confirmed or reversal_confirmed
+    recommended_mode = "SWING" if setup_confirmed else "WAIT"
+    signal = m15_direction if setup_confirmed else "WAIT"
+    confidence = (
+        min(
+            float(h1.get("confidence", 0.0) or 0.0),
+            float(m15.get("confidence", 0.0) or 0.0),
+        )
+        if setup_confirmed
+        else 0.0
     )
-    confidence = float(m15.get("confidence", 0.0) or 0.0) if signal != "WAIT" else 0.0
     buy_probability = min(
         float(h1.get("probabilities", {}).get("buy", 0.0) or 0.0),
         float(m15.get("probabilities", {}).get("buy", 0.0) or 0.0),
@@ -141,7 +160,7 @@ def ml_predict_consensus_endpoint(
         and entry_candle_high >= entry_candle_low > 0
     )
     entry_triggered = bool(
-        recommended_mode in {"SWING", "SCALP"}
+        recommended_mode == "SWING"
         and signal in {"BUY", "SELL"}
         and valid_entry_zone
         and entry_candle_low <= entry_zone_high
@@ -149,21 +168,38 @@ def ml_predict_consensus_endpoint(
     )
     entry_status = (
         "ZONE_TOUCHED" if entry_triggered
-        else "NO_DIRECTION" if signal not in {"BUY", "SELL"}
+        else "WAIT_FOR_M15_CONFIRMATION" if h1_direction in {"BUY", "SELL"} and not setup_confirmed
+        else "NO_TREND_DIRECTION" if h1_direction not in {"BUY", "SELL"}
         else "WAIT_FOR_ZONE" if valid_entry_zone
         else "NO_ENTRY_ZONE"
     )
     h1_version = h1.get("model_version", "unknown")
     m15_version = m15.get("model_version", "unknown")
+    confirmation_status = (
+        "REVERSAL_CONFIRMED" if reversal_confirmed
+        else "DIRECTION_CONFIRMED" if direction_confirmed
+        else "WAIT_M15_CONFIRMATION" if h1_direction in {"BUY", "SELL"}
+        else "NO_TREND_DIRECTION"
+    )
 
     return {
         "symbol": batch.symbol.upper(),
         "timeframe": "H1+M15",
         "signal": signal,
-        "signal_reason": "H1_M15_REVERSAL_AGREE" if recommended_mode == "SWING" and h1_setup == "reversal" else "H1_M15_AGREE" if recommended_mode == "SWING" else "H1_NO_EDGE_M15_ENTRY" if recommended_mode == "SCALP" else "H1_M15_DISAGREE_OR_WAIT" if h1_signal in {"BUY", "SELL"} and m15_signal in {"BUY", "SELL"} else "NO_VALID_MODE_SETUP",
+        "signal_reason": (
+            "M15_REVERSAL_CONFIRMED"
+            if reversal_confirmed
+            else "H1_M15_DIRECTION_CONFIRMED"
+            if direction_confirmed
+            else "WAIT_FOR_M15_CONFIRMATION"
+            if h1_direction in {"BUY", "SELL"}
+            else "NO_TREND_DIRECTION"
+        ),
         "confidence": round(confidence, 2),
         "setup_type": m15_setup if signal != "WAIT" else "unknown",
         "direction": signal if signal != "WAIT" else "NONE",
+        "trend_direction": h1_direction,
+        "confirmation_status": confirmation_status,
         "recommended_mode": recommended_mode,
         "planned_direction": signal,
         "entry_direction": signal if entry_triggered else "WAIT",
