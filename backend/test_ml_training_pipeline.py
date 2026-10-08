@@ -8,6 +8,8 @@ import pandas as pd
 from ml.dataset_builder import DatasetBuilder
 from ml.predictor import ModelPredictor
 from ml.walk_forward import WalkForwardValidator
+from core.data_processor import MarketDataProcessor
+from core.trading_engine import TradingEngine
 
 
 class DummyMulticlassModel:
@@ -301,6 +303,41 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         self.assertAlmostEqual(result["probability_reversal"], 0.65)
         self.assertAlmostEqual(result["buy_probability"], 0.72)
         self.assertAlmostEqual(result["sell_probability"], 0.21)
+
+    def test_market_trend_remains_detectable_when_setup_model_says_no_edge(self):
+        candles = []
+        for index in range(320):
+            close = 200.0 - index * 0.25 + np.sin(index / 4) * 0.3
+            open_ = close + 0.08
+            candles.append({
+                "timestamp": pd.Timestamp("2025-01-01") + pd.Timedelta(hours=index),
+                "open": open_,
+                "high": max(open_, close) + 0.35,
+                "low": min(open_, close) - 0.35,
+                "close": close,
+                "volume": 1000.0,
+            })
+
+        class NoEdgePredictor:
+            def predict(self, X, features):
+                return {
+                    "setup_type": "no_edge",
+                    "direction": "NONE",
+                    "signal": "WAIT",
+                    "setup_probability": 0.3,
+                    "probability_no_edge": 0.7,
+                    "threshold": 0.62,
+                }
+
+        result = TradingEngine(NoEdgePredictor()).analyze(
+            MarketDataProcessor().prepare(candles),
+            use_structure_filters=False,
+        )
+
+        self.assertEqual(result["signal"], "WAIT")
+        self.assertEqual(result["direction"], "NONE")
+        self.assertEqual(result["trend_direction"], "SELL")
+        self.assertGreaterEqual(result["trend_strength"], 0.4)
 
     def test_predictor_maps_expanded_features_to_legacy_model_schema(self):
         class ShapeCheckingModel:

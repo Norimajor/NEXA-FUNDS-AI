@@ -6,6 +6,7 @@ from .market_structure import MarketStructureAnalyzer
 from .feature_engine import FeatureEngine
 from .signal_engine import SignalEngine
 from .risk_engine import RiskEngine
+from .trend_engine import TrendEngine
 
 @dataclass
 class TradingEngine:
@@ -17,10 +18,12 @@ class TradingEngine:
     feature_engine: FeatureEngine = field(default_factory=FeatureEngine)
     signal_engine: SignalEngine = field(default_factory=SignalEngine)
     risk_engine: RiskEngine = field(default_factory=RiskEngine)
+    trend_engine: TrendEngine = field(default_factory=TrendEngine)
 
     def analyze(self, df, account_balance=0, use_structure_filters=True):
         channels=self.channel_detector.detect(df); channel=channels[0] if channels else None
         zones=self.sd_detector.detect(df); structure=self.structure_analyzer.analyze(df)
+        trend=self.trend_engine.analyze(df, structure)
         features=self.feature_engine.build(df,channel,zones,structure)
         prediction=self.predictor.predict(self.feature_engine.vector(features),features)
         decision=self.signal_engine.decide(prediction,channel,structure,use_structure_filters)
@@ -65,6 +68,9 @@ class TradingEngine:
                 'signal':decision['signal'],'signal_reason':decision['signal_reason'],'confidence':decision['confidence'],
             'setup_type':decision['setup_type'],'direction':decision['direction'],
             'setup_probability':decision['setup_probability'],
+            'trend_direction':trend['direction'],'trend_strength':trend['strength'],
+            'trend_reason':trend['reason'],'trend_bull_score':trend['bull_score'],
+            'trend_bear_score':trend['bear_score'],
                 'probabilities':probabilities,
                 'grid_interval_buy_atr':decision['grid_interval_buy_atr'],
                 'grid_interval_sell_atr':decision['grid_interval_sell_atr'],

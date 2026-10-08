@@ -157,6 +157,42 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["entry_status"], "WAIT_FOR_M15_CONFIRMATION")
         self.assertEqual(result["entry_direction"], "WAIT")
 
+    def test_consensus_uses_market_trend_when_h1_setup_classifier_returns_wait(self):
+        h1_result = deepcopy(self.h1_result)
+        m15_result = deepcopy(self.m15_result)
+        h1_result.update(
+            signal="WAIT",
+            direction="NONE",
+            setup_type="no_edge",
+            trend_direction="SELL",
+            trend_strength=0.86,
+            trend_reason="PRICE_BELOW_BEARISH_EMA_STACK|LOWER_SWING_HIGHS_AND_LOWS",
+        )
+        m15_result.update(
+            signal="SELL",
+            direction="SELL",
+            setup_type="continuation",
+            confidence=67.0,
+        )
+
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[h1_result, m15_result],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=self.payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["trend_direction"], "SELL")
+        self.assertEqual(result["trend_strength"], 0.86)
+        self.assertEqual(result["signal"], "SELL")
+        self.assertEqual(result["signal_reason"], "H1_M15_DIRECTION_CONFIRMED")
+        self.assertEqual(result["confidence"], 67.0)
+
     def test_consensus_waits_until_latest_candle_touches_entry_zone(self):
         m15_result = deepcopy(self.m15_result)
         m15_result["candle_low"] = 100.6

@@ -92,19 +92,21 @@ def ml_predict_consensus_endpoint(
     m15_signal = m15.get("signal", "WAIT")
     h1_setup = h1.get("setup_type", "unknown")
     m15_setup = m15.get("setup_type", "unknown")
-    h1_has_learned_setup = h1_setup in {
-        "continuation",
-        "breakout",
-        "reversal",
-        "failed_breakout",
-    }
-    h1_direction = h1.get("direction", h1_signal)
-    if (
-        h1_direction not in {"BUY", "SELL"}
-        or h1_signal != h1_direction
-        or not h1_has_learned_setup
-    ):
-        h1_direction = "NONE"
+    h1_direction = h1.get("trend_direction", "NONE")
+    if h1_direction not in {"BUY", "SELL"}:
+        h1_has_learned_setup = h1_setup in {
+            "continuation",
+            "breakout",
+            "reversal",
+            "failed_breakout",
+        }
+        h1_direction = h1.get("direction", h1_signal)
+        if (
+            h1_direction not in {"BUY", "SELL"}
+            or h1_signal != h1_direction
+            or not h1_has_learned_setup
+        ):
+            h1_direction = "NONE"
     m15_direction = m15.get("direction", m15_signal)
     if m15_direction not in {"BUY", "SELL"} or m15_signal != m15_direction:
         m15_direction = "NONE"
@@ -128,14 +130,15 @@ def ml_predict_consensus_endpoint(
     setup_confirmed = direction_confirmed or reversal_confirmed
     recommended_mode = "SWING" if setup_confirmed else "WAIT"
     signal = m15_direction if setup_confirmed else "WAIT"
-    confidence = (
-        min(
-            float(h1.get("confidence", 0.0) or 0.0),
-            float(m15.get("confidence", 0.0) or 0.0),
+    if setup_confirmed:
+        m15_confidence = float(m15.get("confidence", 0.0) or 0.0)
+        confidence = (
+            min(float(h1.get("confidence", 0.0) or 0.0), m15_confidence)
+            if h1_signal == h1_direction
+            else m15_confidence
         )
-        if setup_confirmed
-        else 0.0
-    )
+    else:
+        confidence = 0.0
     buy_probability = min(
         float(h1.get("probabilities", {}).get("buy", 0.0) or 0.0),
         float(m15.get("probabilities", {}).get("buy", 0.0) or 0.0),
@@ -199,6 +202,8 @@ def ml_predict_consensus_endpoint(
         "setup_type": m15_setup if signal != "WAIT" else "unknown",
         "direction": signal if signal != "WAIT" else "NONE",
         "trend_direction": h1_direction,
+        "trend_strength": round(float(h1.get("trend_strength", 0.0) or 0.0), 3),
+        "trend_reason": h1.get("trend_reason", "MODEL_OR_LEGACY_DIRECTION"),
         "confirmation_status": confirmation_status,
         "recommended_mode": recommended_mode,
         "planned_direction": signal,

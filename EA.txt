@@ -1,14 +1,14 @@
 //+------------------------------------------------------------------+
-//|                                    NEXA AI 2.30 |
+//|                                    NEXA AI 2.31 |
 //|                        Copyright 2024, MetaQuotes Software Corp. |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, MetaQuotes Software Corp."
 #property link      "https://www.mql5.com"
-#property version   "2.30"
-#property description "NEXA AI 2.30 - trend-led ML setup confirmation and execution guard"
+#property version   "2.31"
+#property description "NEXA AI 2.31 - training-aligned H1 trend and setup separation"
 
-#define NEXA_VERSION "2.30"
+#define NEXA_VERSION "2.31"
 #define EA_VERSION NEXA_VERSION
 #define DASHBOARD_VERSION NEXA_VERSION
 #define EA_MAGIC_NUMBER 123456
@@ -1442,7 +1442,9 @@ bool AcceptMLPrediction(string body) {
     if(runtime_operating_mode==NEXA_SWING) {
         selected_mode=server_setup_valid?"SWING":"WAIT";
         selected_signal=server_setup_valid?signal:"WAIT";
-        confidence=MathMin(ml_m15_confidence,ml_h1_confidence);
+        confidence=ml_m15_confidence;
+        if(ml_h1_signal==ml_trend_direction && ml_h1_signal!="WAIT")
+            confidence=MathMin(ml_m15_confidence,ml_h1_confidence);
     } else if(runtime_operating_mode==NEXA_SCALP) {
         selected_mode=IsGoldSymbol() && server_setup_valid?"SCALP":"WAIT";
         selected_signal=selected_mode=="SCALP"?signal:"WAIT";
@@ -1452,7 +1454,9 @@ bool AcceptMLPrediction(string body) {
         else
             signal_reason=IsGoldSymbol()?"ML_SETUP_UNCONFIRMED":"ML_SCALP_REQUIRES_GOLD_SYMBOL";
     } else {
-        double swing_confidence=MathMin(ml_m15_confidence,ml_h1_confidence);
+        double swing_confidence=ml_m15_confidence;
+        if(ml_h1_signal==ml_trend_direction && ml_h1_signal!="WAIT")
+            swing_confidence=MathMin(ml_m15_confidence,ml_h1_confidence);
         double swing_stop_atr=signal=="BUY"?ml_swing_stop_buy_atr:ml_swing_stop_sell_atr;
         double swing_target_atr=signal=="BUY"?ml_swing_target_buy_atr:ml_swing_target_sell_atr;
         bool swing_threshold_met=server_setup_valid &&

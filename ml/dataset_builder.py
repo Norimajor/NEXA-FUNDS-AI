@@ -8,6 +8,7 @@ from core.data_processor import MarketDataProcessor
 from core.feature_engine import FEATURE_NAMES, FeatureEngine
 from core.market_structure import MarketStructureAnalyzer
 from core.supply_demand_detector import SupplyDemandDetector
+from core.trend_engine import training_trend_bias
 
 
 class DatasetBuilder:
@@ -80,9 +81,7 @@ class DatasetBuilder:
     def _future_context(self, hist: pd.DataFrame, future: pd.DataFrame, atr: float, entry: float):
         ref_high = hist["high"].iloc[-self.horizon :].max() if len(hist) >= self.horizon else hist["high"].max()
         ref_low = hist["low"].iloc[-self.horizon :].min() if len(hist) >= self.horizon else hist["low"].min()
-        recent_close = hist["close"].iloc[-min(20, len(hist)):]
-        trend_move_atr = float((recent_close.iloc[-1] - recent_close.iloc[0]) / max(atr, 1e-8))
-        trend_bias = 1.0 if trend_move_atr >= 0.5 else -1.0 if trend_move_atr <= -0.5 else 0.0
+        trend_bias, trend_move_atr = training_trend_bias(hist["close"], atr)
         up_move = float(future["high"].max() - entry)
         down_move = float(entry - future["low"].min())
         future_return = float((future["close"].iloc[-1] - entry) / max(atr, 1e-8))
