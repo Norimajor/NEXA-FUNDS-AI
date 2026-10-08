@@ -170,6 +170,38 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertGreater(result["entry_zone_low"], 0)
         self.assertIn("no listed context cue", result["setup_context"])
 
+    def test_consensus_preserves_learned_range_instead_of_none(self):
+        h1_result = deepcopy(self.h1_result)
+        m15_result = deepcopy(self.m15_result)
+        h1_result.update(
+            signal="BUY",
+            direction="BUY",
+            setup_type="continuation",
+            trend_direction="RANGE",
+            trend_strength=0.71,
+            trend_reason="ML_TREND_RANGE=0.710",
+            trend_model_version="h1_trend_test",
+        )
+        m15_result.update(signal="SELL", direction="SELL", setup_type="reversal")
+
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[h1_result, m15_result],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=self.payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["trend_direction"], "RANGE")
+        self.assertEqual(result["trend_model_version"], "h1_trend_test")
+        self.assertEqual(result["signal"], "WAIT")
+        self.assertEqual(result["confirmation_status"], "RANGE_NO_DIRECTIONAL_BIAS")
+        self.assertEqual(result["entry_status"], "RANGE_WAIT_FOR_DIRECTION")
+
     def test_consensus_uses_market_trend_when_h1_setup_classifier_returns_wait(self):
         h1_result = deepcopy(self.h1_result)
         m15_result = deepcopy(self.m15_result)

@@ -74,6 +74,8 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         for key in [
             "label",
             "label_name",
+            "market_trend",
+            "market_trend_move_atr",
             "probability_reversal",
             "probability_continuation",
             "probability_breakout",
@@ -322,6 +324,14 @@ class MultiClassModelPipelineTests(unittest.TestCase):
             })
 
         class NoEdgePredictor:
+            def predict_trend(self, features):
+                return {
+                    "direction": "SELL",
+                    "confidence": 0.91,
+                    "reason": "ML_TREND_SELL",
+                    "model_version": "trend_test",
+                }
+
             def predict(self, X, features):
                 return {
                     "setup_type": "no_edge",
@@ -340,7 +350,67 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         self.assertEqual(result["signal"], "WAIT")
         self.assertEqual(result["direction"], "NONE")
         self.assertEqual(result["trend_direction"], "SELL")
-        self.assertGreaterEqual(result["trend_strength"], 0.4)
+        self.assertEqual(result["trend_strength"], 0.91)
+        self.assertEqual(result["trend_model_version"], "trend_test")
+
+    def test_market_trend_training_label_uses_trailing_price_path(self):
+        from core.trend_engine import training_market_trend
+
+        downtrend = np.linspace(200.0, 150.0, 50)
+        uptrend = np.linspace(150.0, 200.0, 50)
+        ranging = 175.0 + np.sin(np.arange(50) / 3.0) * 0.2
+
+        self.assertEqual(training_market_trend(downtrend, 1.0)[0], "SELL")
+        self.assertEqual(training_market_trend(uptrend, 1.0)[0], "BUY")
+        self.assertEqual(training_market_trend(ranging, 1.0)[0], "RANGE")
+        self.assertEqual(training_market_trend(downtrend[-20:], 1.0)[0], "RANGE")
+
+    def test_predictor_returns_a_learned_trend_class_without_none(self):
+        class TrendModel:
+            classes_ = np.array(["BUY", "RANGE", "SELL"])
+
+            def predict_proba(self, X):
+                return np.array([[0.10, 0.15, 0.75]])
+
+        predictor = ModelPredictor.__new__(ModelPredictor)
+        predictor.trend_bundle = {
+            "trend_model": TrendModel(),
+            "trend_class_names": list(TrendModel.classes_),
+            "feature_names": ["return_20"],
+            "version": "trend_test",
+        }
+        result = predictor.predict_trend({"return_20": -0.02})
+
+        self.assertEqual(result["direction"], "SELL")
+        self.assertEqual(result["confidence"], 0.75)
+        self.assertEqual(result["model_version"], "trend_test")
+
+    def test_trend_predictor_uses_range_when_model_bundle_is_unavailable(self):
+        predictor = ModelPredictor.__new__(ModelPredictor)
+        predictor.trend_bundle = None
+
+        result = predictor.predict_trend({"return_20": 0.0})
+
+        self.assertEqual(result["direction"], "RANGE")
+        self.assertNotEqual(result["direction"], "NONE")
+
+    def test_trend_model_trainer_saves_separate_classifier_and_holdout_metrics(self):
+        from tempfile import TemporaryDirectory
+        from ml.model_trainer import ModelTrainer
+
+        rng = np.random.default_rng(42)
+        X = rng.normal(size=(600, 4))
+        y = np.where(X[:, 0] > 0.7, "BUY", np.where(X[:, 0] < -0.7, "SELL", "RANGE"))
+        with TemporaryDirectory() as model_dir:
+            result = ModelTrainer(model_dir=model_dir).train_trend(
+                X, y, ["f1", "f2", "f3", "f4"], "trend_test"
+            )
+            bundle = joblib.load(result["path"])
+
+        self.assertIn("trend_model", bundle)
+        self.assertEqual(set(bundle["trend_class_names"]), {"BUY", "SELL", "RANGE"})
+        self.assertGreater(result["metrics"]["balanced_accuracy"], 0.5)
+        self.assertEqual(result["metrics"]["chronological_test_samples"], 120)
 
     def test_predictor_maps_expanded_features_to_legacy_model_schema(self):
         class ShapeCheckingModel:

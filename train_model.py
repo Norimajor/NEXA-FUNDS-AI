@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from core.data_processor import MarketDataProcessor
@@ -77,6 +78,7 @@ p.add_argument('--sample-stride', type=int, default=1, help='Use every Nth label
 p.add_argument('--max-rows-per-file', type=int, default=50000, help='Maximum labeled examples per file (default: 50000).')
 p.add_argument('--grid-take-profit-distance', type=float, help='Optional price-distance target for direction-specific grid interval labels.')
 p.add_argument('--interval-only', action='store_true', help='Train only grid spacing regressors; do not replace or promote a direction classifier.')
+p.add_argument('--trend-only', action='store_true', help='Train a separate BUY/SELL/RANGE trend classifier without changing the setup model.')
 p.add_argument(
     '--force-promote',
     action='store_true',
@@ -94,6 +96,8 @@ if args.max_rows_per_file < 200:
     raise SystemExit('--max-rows-per-file must be at least 200.')
 if args.grid_take_profit_distance is not None and args.grid_take_profit_distance <= 0:
     raise SystemExit('--grid-take-profit-distance must be greater than zero.')
+if args.interval_only and args.trend_only:
+    raise SystemExit('--interval-only and --trend-only cannot be used together.')
 
 dataset = load_dataset_from_csvs(
     csv_paths,
@@ -108,6 +112,20 @@ print('Label distribution:')
 print(dataset['label_name'].value_counts().sort_index().to_string())
 
 X = dataset[TRAINING_FEATURE_NAMES].values
+if args.trend_only:
+    trend_labels = dataset['market_trend'].to_numpy()
+    finite_rows = np.isfinite(X).all(axis=1) & pd.notna(trend_labels)
+    excluded_rows = int(len(dataset) - finite_rows.sum())
+    X = X[finite_rows]
+    trend_labels = trend_labels[finite_rows]
+    if excluded_rows:
+        print(f'Excluded {excluded_rows} trend rows with non-finite features or missing labels.')
+    result = ModelTrainer().train_trend(
+        X, trend_labels, TRAINING_FEATURE_NAMES, args.version
+    )
+    print('Chronological trend-model holdout:', json.dumps(result['metrics'], indent=2))
+    print('Trend model saved separately; the setup model was not promoted or replaced.')
+    raise SystemExit(0)
 y = dataset.label_name.values
 interval_targets = dataset[['grid_interval_buy_atr', 'grid_interval_sell_atr']].values
 exit_targets = dataset[[

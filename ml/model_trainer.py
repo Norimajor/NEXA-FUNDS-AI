@@ -36,6 +36,82 @@ class ModelTrainer:
             ))
         return models, errors
 
+    def train_trend(self, X, y, feature_names, version='trend_candidate'):
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y)
+        if len(X) < 200 or y.shape != (len(X),) or not np.isfinite(X).all():
+            raise ValueError('At least 200 finite feature rows and one market-trend label per row are required.')
+        expected_classes = {'BUY', 'SELL', 'RANGE'}
+        if set(y) != expected_classes:
+            raise ValueError('Trend training labels must include BUY, SELL, and RANGE.')
+        split = int(len(X) * 0.8)
+        if split <= 0 or split >= len(X):
+            raise ValueError('Insufficient history for a chronological trend-model holdout.')
+        train_y, test_y = y[:split], y[split:]
+        if set(train_y) != expected_classes or set(test_y) != expected_classes:
+            raise ValueError('The chronological trend-model train and test splits must each include BUY, SELL, and RANGE.')
+
+        model = HistGradientBoostingClassifier(
+            learning_rate=.04,
+            max_iter=350,
+            max_leaf_nodes=15,
+            min_samples_leaf=15,
+            l2_regularization=1.0,
+            class_weight='balanced',
+            random_state=42,
+        )
+        model.fit(X[:split], train_y)
+        test_prediction = model.predict(X[split:])
+        classes = [str(label) for label in model.classes_]
+        precision = precision_score(
+            test_y, test_prediction, labels=model.classes_, average=None, zero_division=0
+        )
+        recall = recall_score(
+            test_y, test_prediction, labels=model.classes_, average=None, zero_division=0
+        )
+        metrics = {
+            'accuracy': float(accuracy_score(test_y, test_prediction)),
+            'balanced_accuracy': float(balanced_accuracy_score(test_y, test_prediction)),
+            'chronological_test_samples': len(X) - split,
+            'classes': classes,
+            'class_precision': {
+                label: float(value) for label, value in zip(classes, precision)
+            },
+            'class_recall': {
+                label: float(value) for label, value in zip(classes, recall)
+            },
+            'test_class_support': {
+                label: int(np.sum(test_y == label)) for label in classes
+            },
+            'test_confusion_matrix': [
+                [
+                    int(np.sum((test_y == actual) & (test_prediction == predicted)))
+                    for predicted in model.classes_
+                ]
+                for actual in model.classes_
+            ],
+        }
+        final_model = HistGradientBoostingClassifier(
+            learning_rate=.04,
+            max_iter=350,
+            max_leaf_nodes=15,
+            min_samples_leaf=15,
+            l2_regularization=1.0,
+            class_weight='balanced',
+            random_state=42,
+        )
+        final_model.fit(X, y)
+        bundle = {
+            'trend_model': final_model,
+            'trend_class_names': [str(label) for label in final_model.classes_],
+            'feature_names': list(feature_names),
+            'version': version,
+        }
+        path = self.dir / f'{version}.joblib'
+        joblib.dump(bundle, path)
+        (self.dir / f'{version}.json').write_text(json.dumps(metrics, indent=2))
+        return {'path': str(path), 'version': version, 'metrics': metrics}
+
     def train_intervals(self, X, targets, feature_names, version='interval_candidate', swing_targets=None, purge=12):
         X = np.asarray(X, dtype=float)
         targets = np.asarray(targets, dtype=float)

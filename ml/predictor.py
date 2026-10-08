@@ -6,11 +6,13 @@ import numpy as np
 
 
 class ModelPredictor:
-    def __init__(self, path='models/current.joblib', threshold=.62, interval_path=None):
+    def __init__(self, path='models/current.joblib', threshold=.62, interval_path=None, trend_path=None):
         self.path = Path(path)
         self.interval_path = Path(interval_path) if interval_path else None
+        self.trend_path = Path(trend_path) if trend_path else None
         self.threshold = threshold
         self.bundle = None
+        self.trend_bundle = None
         self._load()
 
     def _load(self):
@@ -23,6 +25,8 @@ class ModelPredictor:
                 self.bundle['interval_feature_names'] = interval_bundle.get(
                     'feature_names', self.bundle.get('feature_names')
                 )
+        if self.trend_path and self.trend_path.exists():
+            self.trend_bundle = joblib.load(self.trend_path)
 
     @property
     def ready(self):
@@ -30,7 +34,59 @@ class ModelPredictor:
 
     def reload(self):
         self.bundle = None
+        self.trend_bundle = None
         self._load()
+
+    def predict_trend(self, features):
+        if not self.trend_bundle:
+            return {
+                'direction': 'RANGE',
+                'confidence': 0.0,
+                'reason': 'TREND_MODEL_UNAVAILABLE',
+                'model_version': 'unavailable',
+                'runner_up_class': 'unavailable',
+                'runner_up_probability': 0.0,
+            }
+        model = self.trend_bundle.get('trend_model')
+        feature_names = self.trend_bundle.get('feature_names')
+        if model is None or not feature_names or not hasattr(model, 'predict_proba'):
+            raise ValueError('Trend model bundle must define a probabilistic model and feature_names.')
+        values = np.asarray(
+            [[float(features.get(name, 0.0)) for name in feature_names]],
+            dtype=float,
+        )
+        probabilities = np.asarray(model.predict_proba(values)[0], dtype=float)
+        classes = self.trend_bundle.get('trend_class_names', getattr(model, 'classes_', None))
+        if classes is None or len(classes) != len(probabilities):
+            raise ValueError('Trend model classes do not match its probability output.')
+        ranked_indices = np.argsort(probabilities)[::-1]
+        best_index = int(ranked_indices[0])
+        runner_up_index = int(ranked_indices[1]) if len(ranked_indices) > 1 else best_index
+        class_directions = {
+            'BUY': 'BUY',
+            'UPTREND': 'BUY',
+            'SELL': 'SELL',
+            'DOWNTREND': 'SELL',
+            'RANGE': 'RANGE',
+        }
+        best_class = str(classes[best_index]).strip().upper()
+        runner_up_class = str(classes[runner_up_index]).strip().upper()
+        direction = class_directions.get(best_class)
+        if direction is None:
+            raise ValueError(f'Unsupported trend model class: {best_class}')
+        confidence = float(probabilities[best_index])
+        runner_up_probability = float(probabilities[runner_up_index])
+        return {
+            'direction': direction,
+            'confidence': confidence,
+            'reason': (
+                f'ML_TREND_{best_class}={confidence:.3f}; '
+                f'runner_up_{runner_up_class}={runner_up_probability:.3f}'
+            ),
+            'model_version': self.trend_bundle.get('version', 'unknown'),
+            'runner_up_class': runner_up_class,
+            'runner_up_probability': runner_up_probability,
+        }
 
     def predict(self, X, features=None):
         empty_result = {

@@ -54,6 +54,17 @@ options_risk_manager = OptionsRiskManager({"stale_data_seconds": 300, "signal_ma
 execution_adapter = ExecutionAdapter(paper_trading=True, live_trading=False)
 
 
+def _trend_predictor_for_timeframe(timeframe: str):
+    normalized = timeframe.strip().upper()
+    if normalized.startswith("PERIOD_"):
+        normalized = normalized[len("PERIOD_"):]
+    if normalized in {"H1", "1H", "60", "60M"}:
+        return h1_engine.predictor
+    if normalized in {"M15", "15M", "15"}:
+        return m15_engine.predictor
+    return None
+
+
 class Candle(BaseModel):
     timestamp: str
     open: float
@@ -94,7 +105,9 @@ def ml_predict_endpoint(batch: CandleBatch, request: Request, x_api_key: str | N
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    result = engine.analyze(prepared)
+    result = engine.analyze(
+        prepared, trend_predictor=_trend_predictor_for_timeframe(batch.timeframe)
+    )
     signal = result["signal"]
     confidence = float(result.get("confidence", 0.0) or 0.0)
     buy_percent = float(result.get("probabilities", {}).get("buy", 0.0) or 0.0)
@@ -197,7 +210,9 @@ def analysis(symbol: str, timeframe: str, limit: int = 500):
     return {
         "symbol": symbol.upper(),
         "timeframe": timeframe.upper(),
-        "analysis": _safe(engine.analyze(prepared)),
+        "analysis": _safe(engine.analyze(
+            prepared, trend_predictor=_trend_predictor_for_timeframe(timeframe)
+        )),
     }
 
 
@@ -207,7 +222,9 @@ def channels(symbol: str, timeframe: str, limit: int = 500):
     if candles.empty:
         raise HTTPException(status_code=404, detail="No market data found.")
     prepared = processor.prepare(candles)
-    result = engine.analyze(prepared)
+    result = engine.analyze(
+        prepared, trend_predictor=_trend_predictor_for_timeframe(timeframe)
+    )
     return {
         "symbol": symbol.upper(),
         "timeframe": timeframe.upper(),
@@ -224,7 +241,9 @@ def supply_demand(symbol: str, timeframe: str, limit: int = 500):
     if candles.empty:
         raise HTTPException(status_code=404, detail="No market data found.")
     prepared = processor.prepare(candles)
-    result = engine.analyze(prepared)
+    result = engine.analyze(
+        prepared, trend_predictor=_trend_predictor_for_timeframe(timeframe)
+    )
     return {
         "symbol": symbol.upper(),
         "timeframe": timeframe.upper(),

@@ -1,0 +1,42 @@
+{
+  "accuracy": 0.8221527053643842,
+  "balanced_accuracy": 0.7955111415790173,
+  "chronological_test_samples": 8631,
+  "classes": [
+    "BUY",
+    "RANGE",
+    "SELL"
+  ],
+  "class_precision": {
+    "BUY": 0.9459313327926466,
+    "RANGE": 0.4467558197127291,
+    "SELL": 0.9251630621352558
+  },
+  "class_recall": {
+    "BUY": 0.8573878951237441,
+    "RANGE": 0.7052384675527756,
+    "SELL": 0.823907062060532
+  },
+  "test_class_support": {
+    "BUY": 4081,
+    "RANGE": 1279,
+    "SELL": 3271
+  },
+  "test_confusion_matrix": [
+    [
+      3499,
+      558,
+      24
+    ],
+    [
+      183,
+      902,
+      194
+    ],
+    [
+      17,
+      559,
+      2695
+    ]
+  ]
+}

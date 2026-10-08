@@ -20,11 +20,17 @@ class TradingEngine:
     risk_engine: RiskEngine = field(default_factory=RiskEngine)
     trend_engine: TrendEngine = field(default_factory=TrendEngine)
 
-    def analyze(self, df, account_balance=0, use_structure_filters=True):
+    def analyze(self, df, account_balance=0, use_structure_filters=True, trend_predictor: object | None = None):
         channels=self.channel_detector.detect(df); channel=channels[0] if channels else None
         zones=self.sd_detector.detect(df); structure=self.structure_analyzer.analyze(df)
-        trend=self.trend_engine.analyze(df, structure)
         features=self.feature_engine.build(df,channel,zones,structure)
+        trend_model = trend_predictor if trend_predictor is not None else self.predictor
+        trend_prediction = (
+            trend_model.predict_trend(features)
+            if hasattr(trend_model, 'predict_trend')
+            else None
+        )
+        trend=self.trend_engine.analyze(trend_prediction)
         prediction=self.predictor.predict(self.feature_engine.vector(features),features)
         decision=self.signal_engine.decide(prediction,channel,structure,use_structure_filters)
         price=float(df.iloc[-1].close); atr=float(df.iloc[-1].atr_14)
@@ -73,8 +79,7 @@ class TradingEngine:
             'runner_up_probability':decision['runner_up_probability'],
             'setup_probability':decision['setup_probability'],
             'trend_direction':trend['direction'],'trend_strength':trend['strength'],
-            'trend_reason':trend['reason'],'trend_bull_score':trend['bull_score'],
-            'trend_bear_score':trend['bear_score'],
+            'trend_reason':trend['reason'],'trend_model_version':trend['model_version'],
                 'probabilities':probabilities,
                 'grid_interval_buy_atr':decision['grid_interval_buy_atr'],
                 'grid_interval_sell_atr':decision['grid_interval_sell_atr'],

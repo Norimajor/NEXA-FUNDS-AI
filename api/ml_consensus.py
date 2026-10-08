@@ -15,11 +15,13 @@ prediction_threshold = float(os.getenv("MODEL_THRESHOLD", "0.62"))
 h1_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_H1_MODEL_PATH", "models/xauusd_h1_pivot_reversal_20261007.joblib"),
     prediction_threshold,
+    trend_path=os.getenv("NEXA_H1_TREND_MODEL_PATH", "models/xauusd_h1_trend_20261008.joblib"),
 ))
 m15_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_M15_MODEL_PATH", "models/xauusd_m15_pivot_reversal_20261007.joblib"),
     prediction_threshold,
     os.getenv("NEXA_M15_INTERVAL_MODEL_PATH", ""),
+    os.getenv("NEXA_M15_TREND_MODEL_PATH", "models/xauusd_m15_trend_20261008.joblib"),
 ))
 INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
 
@@ -130,8 +132,8 @@ def ml_predict_consensus_endpoint(
     m15_signal = m15.get("signal", "WAIT")
     h1_setup = h1.get("setup_type", "unknown")
     m15_setup = m15.get("setup_type", "unknown")
-    h1_direction = h1.get("trend_direction", "NONE")
-    if h1_direction not in {"BUY", "SELL"}:
+    h1_direction = h1.get("trend_direction")
+    if h1_direction not in {"BUY", "SELL", "RANGE"}:
         h1_has_learned_setup = h1_setup in {
             "continuation",
             "breakout",
@@ -144,7 +146,7 @@ def ml_predict_consensus_endpoint(
             or h1_signal != h1_direction
             or not h1_has_learned_setup
         ):
-            h1_direction = "NONE"
+            h1_direction = "RANGE"
     m15_direction = m15.get("direction", m15_signal)
     if m15_direction not in {"BUY", "SELL"} or m15_signal != m15_direction:
         m15_direction = "NONE"
@@ -218,7 +220,7 @@ def ml_predict_consensus_endpoint(
     entry_status = (
         "ZONE_TOUCHED" if entry_triggered
         else "WAIT_FOR_M15_CONFIRMATION" if h1_direction in {"BUY", "SELL"} and not setup_confirmed
-        else "NO_TREND_DIRECTION" if h1_direction not in {"BUY", "SELL"}
+        else "RANGE_WAIT_FOR_DIRECTION" if h1_direction == "RANGE"
         else "WAIT_FOR_ZONE" if valid_entry_zone
         else "NO_ENTRY_ZONE"
     )
@@ -228,7 +230,7 @@ def ml_predict_consensus_endpoint(
         "REVERSAL_CONFIRMED" if reversal_confirmed
         else "DIRECTION_CONFIRMED" if direction_confirmed
         else "WAIT_M15_CONFIRMATION" if h1_direction in {"BUY", "SELL"}
-        else "NO_TREND_DIRECTION"
+        else "RANGE_NO_DIRECTIONAL_BIAS"
     )
     model_class = m15.get(
         "model_class",
@@ -275,7 +277,7 @@ def ml_predict_consensus_endpoint(
             if direction_confirmed
             else "WAIT_FOR_M15_CONFIRMATION"
             if h1_direction in {"BUY", "SELL"}
-            else "NO_TREND_DIRECTION"
+            else "WAIT_FOR_MARKET_DIRECTION"
         ),
         "confidence": round(confidence, 2),
         "setup_type": m15_setup if signal != "WAIT" else "unknown",
@@ -283,6 +285,7 @@ def ml_predict_consensus_endpoint(
         "trend_direction": h1_direction,
         "trend_strength": round(float(h1.get("trend_strength", 0.0) or 0.0), 3),
         "trend_reason": h1.get("trend_reason", "MODEL_OR_LEGACY_DIRECTION"),
+        "trend_model_version": h1.get("trend_model_version", "unavailable"),
         "model_class": model_class,
         "model_class_probability": round(model_class_probability, 4),
         "runner_up_class": runner_up_class,

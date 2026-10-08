@@ -8,7 +8,7 @@ from core.data_processor import MarketDataProcessor
 from core.feature_engine import FEATURE_NAMES, FeatureEngine
 from core.market_structure import MarketStructureAnalyzer
 from core.supply_demand_detector import SupplyDemandDetector
-from core.trend_engine import training_trend_bias
+from core.trend_engine import training_market_trend, training_trend_bias
 
 
 class DatasetBuilder:
@@ -178,6 +178,7 @@ class DatasetBuilder:
             if future.empty:
                 continue
             context = self._future_context(hist, future, atr, entry)
+            market_trend, market_trend_move_atr = training_market_trend(hist["close"], atr)
             label_index, label_name, direction = self._label_from_context(context)
             setup_type = label_name.rsplit("_", 1)[0] if direction != "NONE" else "no_edge"
             row = {
@@ -202,6 +203,8 @@ class DatasetBuilder:
                     "probability_flat": float(direction == "NONE"),
                     "future_return": context["future_return"],
                     "trend_bias": context["trend_bias"],
+                    "market_trend": market_trend,
+                    "market_trend_move_atr": market_trend_move_atr,
                     "up_move_atr": context["up_move_atr"],
                     "down_move_atr": context["down_move_atr"],
                     "grid_interval_buy_atr": context["grid_interval_buy_atr"],

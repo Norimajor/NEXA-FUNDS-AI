@@ -15,6 +15,17 @@ class SignalApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
+    def test_trend_predictor_uses_matching_timeframe_model(self):
+        self.assertIs(
+            web_server._trend_predictor_for_timeframe("PERIOD_H1"),
+            web_server.h1_engine.predictor,
+        )
+        self.assertIs(
+            web_server._trend_predictor_for_timeframe("M15"),
+            web_server.m15_engine.predictor,
+        )
+        self.assertIsNone(web_server._trend_predictor_for_timeframe("M5"))
+
     def test_local_prediction_auth_does_not_disable_remote_or_ingestion_auth(self):
         with patch("api.web_server.INGEST_API_KEY", "configured-test-key"), patch.dict(
             os.environ, {"ALLOW_LOCAL_ML_PREDICTIONS": "true"}
@@ -306,8 +317,9 @@ class SignalApiTests(unittest.TestCase):
         self.assertEqual(result["recommended_mode"], "WAIT")
         self.assertEqual(result["signal"], "WAIT")
         self.assertEqual(result["planned_direction"], "WAIT")
-        self.assertEqual(result["confirmation_status"], "NO_TREND_DIRECTION")
-        self.assertEqual(result["entry_status"], "NO_TREND_DIRECTION")
+        self.assertEqual(result["trend_direction"], "RANGE")
+        self.assertEqual(result["confirmation_status"], "RANGE_NO_DIRECTIONAL_BIAS")
+        self.assertEqual(result["entry_status"], "RANGE_WAIT_FOR_DIRECTION")
         self.assertEqual(result["h1_signal"], "WAIT")
         self.assertEqual(result["m15_signal"], "BUY")
         self.assertEqual(result["m15_atr"], 2.0)
