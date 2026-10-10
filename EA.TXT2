@@ -1,0 +1,1801 @@
+//+------------------------------------------------------------------+
+//|                                                        ML EA 1.0 |
+//|                        Copyright 2024, MetaQuotes Software Corp. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, MetaQuotes Software Corp."
+#property link      "https://www.mql5.com"
+#property version   "1.05"
+#property description "ML EA 1.05 - HTTP request diagnostics"
+
+#include <Object.mqh>
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\OrderInfo.mqh>
+#include <Trade\HistoryOrderInfo.mqh>
+#include <Trade\DealInfo.mqh>
+
+#define NEXA_PRODUCT_ID "nexa-ml"
+
+// Input parameters
+input group "=== ML TREND FILTER (NEXA FUNDS AI) ==="
+input string InpMLBaseURL        = "https://nexa-funds-ai.onrender.com";   // Server URL (add to Tools > Options > Expert Advisors > WebRequest)
+input string InpMLApiKey         = "";                                    // Set current Render INGEST_API_KEY (x-api-key)
+input string InpMLSymbolOverride = "";                                     // Symbol name sent to server (blank = chart symbol)
+input int    InpMLRefreshSeconds = 300;                                    // Trend refresh interval (seconds)
+input int    InpMLTimeoutMs      = 60000;                                  // Allow Render cold starts (milliseconds)
+input bool   InpShowDashboard    = true;                                   // Show on-chart dashboard
+
+input group "=== NEXAFUNDS LICENSE ==="
+input string InpNexaLicenseKey = "";  // Paste the account key from your NexaFunds EA Access portal
+input string InpNexaLicenseURL = "https://nexafunds-app.onrender.com";  // Add this URL to MT5 WebRequest allowlist
+
+input group "=== GENERAL SETTINGS ==="
+input double InpLotSize = 0.01;                      // Fixed lot size (if not using risk-based)
+input bool InpUseRiskBasedLots = true;               // Use risk-based lot sizing
+input double InpRiskPercentage = 2.0;                // Risk percentage per trade
+input int InpMaxTradesPerDay = 8;                    // Maximum trades per day
+input int InpMaxTradesPerHour = 3;                   // Maximum trades per hour
+input int InpMinTimeBetweenTrades = 5;               // Minimum minutes between trades
+
+input group "=== HIGH PROBABILITY INDICATORS ==="
+input bool InpUseRSI = true;                         // Use RSI filter
+input int InpRSIPeriod = 14;                         // RSI period
+input double InpRSIOverbought = 70.0;                // RSI overbought level
+input double InpRSIOversold = 30.0;                  // RSI oversold level
+input bool InpUseEMA = true;                         // Use EMA crossover
+input int InpEMAFast = 21;                           // Fast EMA period
+input int InpEMASlow = 50;                           // Slow EMA period
+input bool InpUseMACD = false;                        // Use MACD histogram
+input int InpMACDFast = 12;                          // MACD fast EMA
+input int InpMACDSlow = 26;                          // MACD slow EMA
+input int InpMACDSignal = 9;                         // MACD signal period
+input bool InpUsePriceAction = true;                 // Use price action confirmation
+
+input group "=== SUPPLY/DEMAND ZONE SETTINGS ==="
+input int InpZoneLookback = 100;                     // Zone identification lookback period
+input double InpZoneStrength = 50;                   // Zone strength (0-100)
+input ENUM_TIMEFRAMES InpConfirmationTF = PERIOD_M15; // Confirmation timeframe
+
+input group "=== CHANGE OF CHARACTER STRATEGY ==="
+input bool InpUseCOCStrategy = true;                 // Use Change of Character strategy
+input int InpCOCLookback = 50;                       // COC detection lookback
+input double InpCOCStrength = 30;                    // COC strength threshold
+input double InpRetracementMin = 38.2;               // Minimum retracement %
+input double InpRetracementMax = 61.8;               // Maximum retracement %
+
+input group "=== ADVANCED TRADE MANAGEMENT ==="
+input bool InpUseATRStops = true;                    // Use ATR-based SL/TP
+input bool InpUsePipStops = false;                   // Use pip-based SL/TP
+input int InpStopLossPips = 50;                      // Stop loss in pips (if using pip stops)
+input int InpTakeProfitPips = 100;                   // Take profit in pips (if using pip stops)
+input int InpATRPeriod = 14;                         // ATR period
+input double InpATRMultiplierSL = 2.0;               // ATR multiplier for SL
+input double InpATRMultiplierTP = 3.0;               // ATR multiplier for TP
+
+input group "=== PARTIAL TAKE PROFIT ==="
+input bool InpUsePartialTP = true;                   // Use partial take profit
+input double InpTP1Percentage = 30.0;                // TP1 lot percentage
+input double InpTP1RR = 1.0;                         // TP1 risk-reward ratio
+input double InpTP2Percentage = 40.0;                // TP2 lot percentage  
+input double InpTP2RR = 2.0;                         // TP2 risk-reward ratio
+input double InpTP3Percentage = 30.0;                // TP3 lot percentage (remaining)
+input double InpTP3RR = 3.0;                         // TP3 risk-reward ratio
+
+input group "=== BREAKEVEN & TRAILING ==="
+input bool InpUseBreakEven = true;                   // Use breakeven
+input double InpBreakEvenTriggerRR = 1.0;            // Breakeven trigger (RR)
+input int InpBreakEvenTriggerPips = 20;              // Breakeven trigger (pips)
+input bool InpUseTrailing = true;                    // Use trailing stop
+input double InpTrailingStartRR = 1.5;               // Trailing start (RR)
+input int InpTrailingStartPips = 30;                 // Trailing start (pips)
+input double InpTrailingStepRR = 0.5;                // Trailing step (RR)
+input int InpTrailingStepPips = 10;                  // Trailing step (pips)
+
+input group "=== SESSION & NEWS FILTERS ==="
+input bool InpUseSessionFilter = true;               // Use session time filter
+input int InpSessionStartHour = 8;                   // Session start hour
+input int InpSessionEndHour = 18;                    // Session end hour
+input bool InpUseNewsFilter = false;                 // Use news event filter (placeholder)
+input int InpNewsFilterMinutes = 30;                 // Minutes to avoid trading around news
+
+input group "=== INSTRUMENT OPTIMIZATION ==="
+input bool InpOptimizeForGold = true;                // Optimize for XAUUSD
+input bool InpOptimizeForBTC = false;                // Optimize for BTCUSD
+input bool InpUseSpreadFilter = true;                // Use spread filter
+input double InpMaxSpreadPips = 3.0;                 // Maximum spread in pips
+
+input group "=== DEBUG & LOGGING ==="
+input bool InpEnableDebugLogs = true;                // Enable detailed debug logs
+input bool InpLogIndicatorValues = true;             // Log indicator values
+input bool InpLogTradeDecisions = true;              // Log trade decisions
+
+//--- Enhanced Structures
+struct TradeInfo {
+    ulong ticket;
+    double entry_price;
+    double stop_loss;
+    double take_profit;
+    double original_lot_size;
+    double remaining_lot_size;
+    bool break_even_moved;
+    bool trailing_active;
+    bool tp1_hit;
+    bool tp2_hit;
+    bool tp3_hit;
+    datetime entry_time;
+    int trade_type; // 0 = buy, 1 = sell
+    string comment;
+};
+
+struct SupplyDemandZone {
+    double high;
+    double low;
+    double pivot_price;
+    datetime formation_time;
+    bool is_supply; // true = supply, false = demand
+    bool has_coc; // Change of Character detected
+    bool awaiting_retracement;
+    double retracement_level;
+    int strength;
+    int touch_count;
+};
+
+struct IndicatorSignals {
+    bool rsi_bullish;
+    bool rsi_bearish;
+    bool ema_bullish;
+    bool ema_bearish;
+    bool macd_bullish;
+    bool macd_bearish;
+    bool price_action_bullish;
+    bool price_action_bearish;
+    double rsi_value;
+    double ema_fast_value;
+    double ema_slow_value;
+    double macd_main;
+    double macd_signal;
+    double macd_histogram;
+};
+
+//--- Global variables
+CTrade trade;
+CPositionInfo position;
+COrderInfo order;
+
+TradeInfo active_trades[];
+SupplyDemandZone identified_zones[];
+IndicatorSignals current_signals;
+
+// Trade counters
+int trades_today = 0;
+int trades_this_hour = 0;
+datetime last_trade_date = 0;
+datetime last_trade_time = 0;
+datetime last_hour_reset = 0;
+
+//--- ML trend state
+int      ml_trend          = 0;      // 1 = bullish, -1 = bearish, 0 = neutral/unknown
+double   ml_confidence     = 0;
+bool     ml_server_online  = false;
+bool     ml_health_reached = false;
+bool     ml_predict_ok     = false;
+datetime ml_last_update    = 0;
+datetime ml_retry_at       = 0;
+int      ml_consecutive_failures = 0;
+string   ml_connection_stage = "BUILD 1.05 READY";
+string   ml_last_error     = "Waiting...";
+string   ml_raw_trend      = "-";
+string   last_decision     = "No signal yet";
+int      trades_blocked_ml = 0;
+int      trades_approved_ml= 0;
+#define DASH "MLEA_"
+
+// Indicator handles
+int rsi_handle = INVALID_HANDLE;
+int ema_fast_handle = INVALID_HANDLE;
+int ema_slow_handle = INVALID_HANDLE;
+int macd_handle = INVALID_HANDLE;
+int atr_handle = INVALID_HANDLE;
+
+bool nexa_license_valid = false;
+datetime nexa_license_checked_at = 0;
+
+string NexaJsonEscape(string value) {
+    StringReplace(value, "\\", "\\\\");
+    StringReplace(value, "\"", "\\\"");
+    StringReplace(value, "\r", "\\r");
+    StringReplace(value, "\n", "\\n");
+    return value;
+}
+
+bool ValidateNexaLicense() {
+    nexa_license_checked_at = TimeLocal();
+    if(StringLen(InpNexaLicenseKey) < 10) {
+        Print("[NEXA][LICENSE] Paste the key issued for this MT5 account in the EA inputs");
+        return false;
+    }
+    if((bool)MQLInfoInteger(MQL_TESTER) || (bool)MQLInfoInteger(MQL_OPTIMIZATION)) {
+        Print("[NEXA][LICENSE] Online account verification is unavailable in the Strategy Tester");
+        return false;
+    }
+
+    long trade_mode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
+    string account_type = "";
+    if(trade_mode == ACCOUNT_TRADE_MODE_DEMO) account_type = "demo";
+    else if(trade_mode == ACCOUNT_TRADE_MODE_REAL) account_type = "real";
+    else {
+        Print("[NEXA][LICENSE] This account type cannot be licensed");
+        return false;
+    }
+
+    string base_url = InpNexaLicenseURL;
+    StringTrimLeft(base_url);
+    StringTrimRight(base_url);
+    while(StringLen(base_url) > 0 && StringSubstr(base_url, StringLen(base_url) - 1) == "/")
+        base_url = StringSubstr(base_url, 0, StringLen(base_url) - 1);
+
+    string payload = "{\"product_id\":\"" + NEXA_PRODUCT_ID +
+        "\",\"license_key\":\"" + NexaJsonEscape(InpNexaLicenseKey) +
+        "\",\"account_login\":\"" + StringFormat("%I64d", AccountInfoInteger(ACCOUNT_LOGIN)) +
+        "\",\"broker_server\":\"" + NexaJsonEscape(AccountInfoString(ACCOUNT_SERVER)) +
+        "\",\"account_type\":\"" + account_type + "\"}";
+    char request[];
+    char response[];
+    string response_headers;
+    int request_size = StringToCharArray(payload, request, 0, WHOLE_ARRAY, CP_UTF8);
+    if(request_size <= 1) {
+        Print("[NEXA][LICENSE] Unable to encode the verification request");
+        return false;
+    }
+    ArrayResize(request, request_size - 1);
+
+    int timeout_ms = InpMLTimeoutMs > 15000 ? InpMLTimeoutMs : 15000;
+    ResetLastError();
+    int status = WebRequest(
+        "POST",
+        base_url + "/api/licenses/validate",
+        "Content-Type: application/json\r\n",
+        timeout_ms,
+        request,
+        response,
+        response_headers
+    );
+    if(status != 200) {
+        Print("[NEXA][LICENSE] Verification failed (HTTP ", status, ", MT5 error ", GetLastError(),
+            "). Check the EA key and allow ", base_url, " in MT5 WebRequest settings.");
+        return false;
+    }
+
+    string body = CharArrayToString(response, 0, WHOLE_ARRAY, CP_UTF8);
+    if(StringFind(body, "\"valid\":true") < 0) {
+        Print("[NEXA][LICENSE] This key is not active for the connected account and server");
+        return false;
+    }
+
+    Print("[NEXA][LICENSE] Account license verified");
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit() {
+    if(InpEnableDebugLogs) Print("🚀 ML EA 1.0 Initializing...");
+    
+    // Validate input parameters
+    if(!ValidateInputs()) {
+        Print("❌ Invalid input parameters");
+        return INIT_PARAMETERS_INCORRECT;
+    }
+
+    nexa_license_valid = ValidateNexaLicense();
+    if(!nexa_license_valid) Print("[NEXA][LICENSE] EA remains attached; new trades are disabled until account verification succeeds");
+    
+    // Initialize indicators
+    if(!InitializeIndicators()) {
+        Print("❌ Failed to initialize indicators");
+        return INIT_FAILED;
+    }
+    
+    // Initialize trade arrays
+    ArrayResize(active_trades, 0);
+    ArrayResize(identified_zones, 0);
+    
+    // Set trade settings
+    trade.SetExpertMagicNumber(123456);
+    trade.SetDeviationInPoints(10);
+    trade.SetTypeFilling(ORDER_FILLING_FOK);
+    
+    // Check trading permissions
+    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) {
+        Print("❌ Trading not allowed");
+        return INIT_FAILED;
+    }
+    
+    // Reset daily counters
+    ResetCounters();
+
+    // ML connection + dashboard
+    EventSetTimer(1);
+    if(InpShowDashboard) CreateDashboard();
+    UpdateMLTrend();
+    UpdateDashboard();
+    
+    if(InpEnableDebugLogs) {
+        Print("✅ ML EA 1.0 Initialized Successfully");
+        Print("📊 Symbol: ", _Symbol, " | Timeframe: ", EnumToString(PERIOD_CURRENT));
+        Print("💰 Risk per trade: ", InpRiskPercentage, "% | Max trades/day: ", InpMaxTradesPerDay);
+    }
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                               |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason) {
+    EventKillTimer();
+    ObjectsDeleteAll(0, DASH);
+    // Release indicator handles
+    if(rsi_handle != INVALID_HANDLE) IndicatorRelease(rsi_handle);
+    if(ema_fast_handle != INVALID_HANDLE) IndicatorRelease(ema_fast_handle);
+    if(ema_slow_handle != INVALID_HANDLE) IndicatorRelease(ema_slow_handle);
+    if(macd_handle != INVALID_HANDLE) IndicatorRelease(macd_handle);
+    if(atr_handle != INVALID_HANDLE) IndicatorRelease(atr_handle);
+    
+    if(InpEnableDebugLogs) Print("📴 ML EA 1.0 Deinitialized");
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                           |
+//+------------------------------------------------------------------+
+void OnTick() {
+    // Update counters
+    UpdateCounters();
+    
+    // Check trading conditions
+    if(!IsTradeAllowed()) return;
+    
+    // Update indicator signals
+    UpdateIndicatorSignals();
+    
+    // Manage existing trades
+    ManageExistingTrades();
+    if(!nexa_license_valid) return;
+
+    // Look for new trading opportunities
+    if(ShouldLookForNewTrades()) {
+        ScanForTradingOpportunities();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Validate input parameters                                      |
+//+------------------------------------------------------------------+
+bool ValidateInputs() {
+    if(InpRiskPercentage <= 0 || InpRiskPercentage > 10) {
+        Print("❌ Invalid risk percentage: ", InpRiskPercentage);
+        return false;
+    }
+    
+    if(InpMaxTradesPerDay <= 0 || InpMaxTradesPerDay > 50) {
+        Print("❌ Invalid max trades per day: ", InpMaxTradesPerDay);
+        return false;
+    }
+    
+    if(InpLotSize <= 0) {
+        Print("❌ Invalid lot size: ", InpLotSize);
+        return false;
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Initialize indicators                                          |
+//+------------------------------------------------------------------+
+bool InitializeIndicators() {
+    if(InpUseRSI) {
+        rsi_handle = iRSI(_Symbol, PERIOD_CURRENT, InpRSIPeriod, PRICE_CLOSE);
+        if(rsi_handle == INVALID_HANDLE) {
+            Print("❌ Failed to create RSI indicator");
+            return false;
+        }
+    }
+    
+    if(InpUseEMA) {
+        ema_fast_handle = iMA(_Symbol, PERIOD_CURRENT, InpEMAFast, 0, MODE_EMA, PRICE_CLOSE);
+        ema_slow_handle = iMA(_Symbol, PERIOD_CURRENT, InpEMASlow, 0, MODE_EMA, PRICE_CLOSE);
+        if(ema_fast_handle == INVALID_HANDLE || ema_slow_handle == INVALID_HANDLE) {
+            Print("❌ Failed to create EMA indicators");
+            return false;
+        }
+    }
+    
+    if(InpUseMACD) {
+        macd_handle = iMACD(_Symbol, PERIOD_CURRENT, InpMACDFast, InpMACDSlow, InpMACDSignal, PRICE_CLOSE);
+        if(macd_handle == INVALID_HANDLE) {
+            Print("❌ Failed to create MACD indicator");
+            return false;
+        }
+    }
+    
+    atr_handle = iATR(_Symbol, PERIOD_CURRENT, InpATRPeriod);
+    if(atr_handle == INVALID_HANDLE) {
+        Print("❌ Failed to create ATR indicator");
+        return false;
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Update indicator signals                                       |
+//+------------------------------------------------------------------+
+void UpdateIndicatorSignals() {
+    // Reset signals
+    ZeroMemory(current_signals);
+    
+    // RSI signals
+    if(InpUseRSI && rsi_handle != INVALID_HANDLE) {
+        double rsi_values[];
+        if(CopyBuffer(rsi_handle, 0, 0, 3, rsi_values) >= 3) {
+            current_signals.rsi_value = rsi_values[0];
+            current_signals.rsi_bullish = (rsi_values[1] <= InpRSIOversold && rsi_values[0] > InpRSIOversold);
+            current_signals.rsi_bearish = (rsi_values[1] >= InpRSIOverbought && rsi_values[0] < InpRSIOverbought);
+            
+            if(InpLogIndicatorValues) {
+                Print("📊 RSI: ", DoubleToString(current_signals.rsi_value, 2), 
+                     " | Bullish: ", current_signals.rsi_bullish,
+                     " | Bearish: ", current_signals.rsi_bearish);
+            }
+        }
+    }
+    
+    // EMA signals
+    if(InpUseEMA && ema_fast_handle != INVALID_HANDLE && ema_slow_handle != INVALID_HANDLE) {
+        double ema_fast[], ema_slow[];
+        if(CopyBuffer(ema_fast_handle, 0, 0, 3, ema_fast) >= 3 && 
+           CopyBuffer(ema_slow_handle, 0, 0, 3, ema_slow) >= 3) {
+            current_signals.ema_fast_value = ema_fast[0];
+            current_signals.ema_slow_value = ema_slow[0];
+            
+            // Crossover detection
+            bool fast_above_slow_now = ema_fast[0] > ema_slow[0];
+            bool fast_above_slow_prev = ema_fast[1] > ema_slow[1];
+            
+            current_signals.ema_bullish = (!fast_above_slow_prev && fast_above_slow_now);
+            current_signals.ema_bearish = (fast_above_slow_prev && !fast_above_slow_now);
+            
+            if(InpLogIndicatorValues) {
+                Print("📈 EMA Fast: ", DoubleToString(current_signals.ema_fast_value, _Digits),
+                     " | EMA Slow: ", DoubleToString(current_signals.ema_slow_value, _Digits),
+                     " | Bullish: ", current_signals.ema_bullish,
+                     " | Bearish: ", current_signals.ema_bearish);
+            }
+        }
+    }
+    
+    // MACD signals
+    if(InpUseMACD && macd_handle != INVALID_HANDLE) {
+        double macd_main[], macd_signal[];
+        if(CopyBuffer(macd_handle, 0, 0, 3, macd_main) >= 3 && 
+           CopyBuffer(macd_handle, 1, 0, 3, macd_signal) >= 3) {
+            current_signals.macd_main = macd_main[0];
+            current_signals.macd_signal = macd_signal[0];
+            current_signals.macd_histogram = macd_main[0] - macd_signal[0];
+            
+            // Histogram crossing zero
+            double prev_histogram = macd_main[1] - macd_signal[1];
+            current_signals.macd_bullish = (prev_histogram <= 0 && current_signals.macd_histogram > 0);
+            current_signals.macd_bearish = (prev_histogram >= 0 && current_signals.macd_histogram < 0);
+            
+            if(InpLogIndicatorValues) {
+                Print("📊 MACD Histogram: ", DoubleToString(current_signals.macd_histogram, _Digits+1),
+                     " | Bullish: ", current_signals.macd_bullish,
+                     " | Bearish: ", current_signals.macd_bearish);
+            }
+        }
+    }
+    
+    // Price action signals
+    if(InpUsePriceAction) {
+        CheckPriceActionSignals();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check price action signals                                    |
+//+------------------------------------------------------------------+
+void CheckPriceActionSignals() {
+    double open[], high[], low[], close[];
+    if(CopyOpen(_Symbol, PERIOD_CURRENT, 0, 3, open) < 3 ||
+       CopyHigh(_Symbol, PERIOD_CURRENT, 0, 3, high) < 3 ||
+       CopyLow(_Symbol, PERIOD_CURRENT, 0, 3, low) < 3 ||
+       CopyClose(_Symbol, PERIOD_CURRENT, 0, 3, close) < 3) return;
+    
+    ArraySetAsSeries(open, true);
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    ArraySetAsSeries(close, true);
+    
+    // Bullish engulfing
+    if(close[1] < open[1] && close[0] > open[0] && 
+       open[0] < close[1] && close[0] > open[1]) {
+        current_signals.price_action_bullish = true;
+        if(InpLogIndicatorValues) Print("🕯️ Bullish Engulfing detected");
+    }
+    
+    // Bearish engulfing
+    if(close[1] > open[1] && close[0] < open[0] && 
+       open[0] > close[1] && close[0] < open[1]) {
+        current_signals.price_action_bearish = true;
+        if(InpLogIndicatorValues) Print("🕯️ Bearish Engulfing detected");
+    }
+    
+    // Hammer pattern (bullish)
+    double body_size = MathAbs(close[0] - open[0]);
+    double lower_wick = MathMin(close[0], open[0]) - low[0];
+    double upper_wick = high[0] - MathMax(close[0], open[0]);
+    
+    if(lower_wick > body_size * 2 && upper_wick < body_size * 0.5) {
+        current_signals.price_action_bullish = true;
+        if(InpLogIndicatorValues) Print("🔨 Hammer pattern detected");
+    }
+    
+    // Shooting star pattern (bearish)
+    if(upper_wick > body_size * 2 && lower_wick < body_size * 0.5) {
+        current_signals.price_action_bearish = true;
+        if(InpLogIndicatorValues) Print("⭐ Shooting Star pattern detected");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if trading is allowed                                   |
+//+------------------------------------------------------------------+
+bool IsTradeAllowed() {
+    // Check terminal and account permissions
+    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED)) {
+        return false;
+    }
+    
+    // Check daily trade limit
+    if(trades_today >= InpMaxTradesPerDay) {
+        if(InpLogTradeDecisions) Print("🚫 Daily trade limit reached: ", trades_today);
+        return false;
+    }
+    
+    // Check hourly trade limit
+    if(trades_this_hour >= InpMaxTradesPerHour) {
+        if(InpLogTradeDecisions) Print("🚫 Hourly trade limit reached: ", trades_this_hour);
+        return false;
+    }
+    
+    // Check session filter
+    if(InpUseSessionFilter && !IsWithinTradingSession()) {
+        return false;
+    }
+    
+    // Check spread filter
+    if(InpUseSpreadFilter && !IsSpreadAcceptable()) {
+        return false;
+    }
+    
+    // Check time between trades
+    if(TimeCurrent() - last_trade_time < InpMinTimeBetweenTrades * 60) {
+        if(InpLogTradeDecisions) Print("🚫 Too soon since last trade");
+        return false;
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Check if within trading session                               |
+//+------------------------------------------------------------------+
+bool IsWithinTradingSession() {
+    MqlDateTime dt;
+    TimeToStruct(TimeCurrent(), dt);
+    
+    if(dt.hour >= InpSessionStartHour && dt.hour < InpSessionEndHour) {
+        return true;
+    }
+    
+    if(InpLogTradeDecisions) {
+        Print("🚫 Outside trading session. Current hour: ", dt.hour);
+    }
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check if spread is acceptable                                 |
+//+------------------------------------------------------------------+
+bool IsSpreadAcceptable() {
+    double spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
+    
+    if(spread > InpMaxSpreadPips) {
+        if(InpLogTradeDecisions) {
+            Print("🚫 Spread too high: ", DoubleToString(spread, 1), " pips");
+        }
+        return false;
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Should look for new trades                                    |
+//+------------------------------------------------------------------+
+bool ShouldLookForNewTrades() {
+    // Don't open new trades if we have too many open positions
+    int open_positions = PositionsTotal();
+    if(open_positions >= 5) {
+        if(InpLogTradeDecisions) Print("🚫 Too many open positions: ", open_positions);
+        return false;
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Scan for trading opportunities                                |
+//+------------------------------------------------------------------+
+void ScanForTradingOpportunities() {
+    if(InpEnableDebugLogs) Print("🔍 Scanning for trading opportunities...");
+    
+    // Update supply/demand zones
+    if(InpUseCOCStrategy) {
+        UpdateSupplyDemandZones();
+        CheckForCOCTrades();
+    }
+    
+    // Check for direct high-probability setups
+    CheckForHighProbabilitySetups();
+}
+
+//+------------------------------------------------------------------+
+//| Check for high probability setups                            |
+//+------------------------------------------------------------------+
+void CheckForHighProbabilitySetups() {
+    // Count bullish and bearish signals
+    int bullish_signals = 0;
+    int bearish_signals = 0;
+    
+    if(current_signals.rsi_bullish) bullish_signals++;
+    if(current_signals.rsi_bearish) bearish_signals++;
+    if(current_signals.ema_bullish) bullish_signals++;
+    if(current_signals.ema_bearish) bearish_signals++;
+    if(current_signals.macd_bullish) bullish_signals++;
+    if(current_signals.macd_bearish) bearish_signals++;
+    if(current_signals.price_action_bullish) bullish_signals++;
+    if(current_signals.price_action_bearish) bearish_signals++;
+    
+    int min_confirmations = 3;
+    if(!ml_predict_ok) {
+        if(InpLogTradeDecisions && (bullish_signals > 0 || bearish_signals > 0))
+            Print("⛔ Indicator setup held: valid ML H1 trend is unavailable");
+        return;
+    }
+
+    if(ml_trend == 1 && bullish_signals >= min_confirmations) {
+        if(InpLogTradeDecisions)
+            Print("🚀 BUY setup agrees with ML H1 trend. Indicator confirmations: ", bullish_signals);
+        ExecuteHighProbabilityTrade(ORDER_TYPE_BUY, bullish_signals);
+    }
+    else if(ml_trend == -1 && bearish_signals >= min_confirmations) {
+        if(InpLogTradeDecisions)
+            Print("🚀 SELL setup agrees with ML H1 trend. Indicator confirmations: ", bearish_signals);
+        ExecuteHighProbabilityTrade(ORDER_TYPE_SELL, bearish_signals);
+    }
+    else if(InpLogTradeDecisions && (bullish_signals > 0 || bearish_signals > 0)) {
+        string blocked_direction = ml_trend == 1 ? "BUY" : (ml_trend == -1 ? "SELL" : "RANGE");
+        Print("⛔ No entry: ML H1 trend is ", blocked_direction,
+              " | indicator BUY confirmations: ", bullish_signals,
+              " | indicator SELL confirmations: ", bearish_signals,
+              " | required: ", min_confirmations);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Execute high probability trade                                |
+//+------------------------------------------------------------------+
+void ExecuteHighProbabilityTrade(ENUM_ORDER_TYPE trade_type, int signal_strength) {
+    double entry_price, stop_loss, take_profit;
+
+    // ML trend confirmation
+    if(!MLTrendAllows(trade_type)) return;
+    
+    // Get entry price
+    if(trade_type == ORDER_TYPE_BUY) {
+        entry_price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    } else {
+        entry_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    }
+    
+    // Calculate SL and TP
+    CalculateStopLossAndTakeProfit(trade_type, entry_price, stop_loss, take_profit);
+    
+    // Calculate lot size
+    double lot_size = CalculateLotSize(entry_price, stop_loss);
+    if(lot_size <= 0) {
+        Print("❌ Invalid lot size calculated");
+        return;
+    }
+    
+    // Execute trade
+    string comment = "HighProb-" + IntegerToString(signal_strength) + "sig";
+    bool result = false;
+    
+    if(trade_type == ORDER_TYPE_BUY) {
+        result = trade.Buy(lot_size, _Symbol, 0, stop_loss, take_profit, comment);
+    } else {
+        result = trade.Sell(lot_size, _Symbol, 0, stop_loss, take_profit, comment);
+    }
+    
+    if(result) {
+        // Add to active trades
+        AddTradeToMonitoring(trade.ResultOrder(), entry_price, stop_loss, take_profit, lot_size, trade_type, comment);
+        
+        // Update counters
+        trades_today++;
+        trades_this_hour++;
+        last_trade_time = TimeCurrent();
+        
+        Print("✅ High Probability Trade Executed!");
+        Print("📊 Type: ", (trade_type == ORDER_TYPE_BUY ? "BUY" : "SELL"));
+        Print("💰 Entry: ", DoubleToString(entry_price, _Digits));
+        Print("🛑 SL: ", DoubleToString(stop_loss, _Digits));
+        Print("🎯 TP: ", DoubleToString(take_profit, _Digits));
+        Print("📏 Lot Size: ", DoubleToString(lot_size, 2));
+        Print("🔢 Signal Strength: ", signal_strength);
+    } else {
+        Print("❌ Trade execution failed. Error: ", trade.ResultRetcode());
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate stop loss and take profit                           |
+//+------------------------------------------------------------------+
+void CalculateStopLossAndTakeProfit(ENUM_ORDER_TYPE trade_type, double entry_price, double &stop_loss, double &take_profit) {
+    if(InpUseATRStops) {
+        // ATR-based SL/TP
+        double atr_values[];
+        if(CopyBuffer(atr_handle, 0, 0, 1, atr_values) >= 1) {
+            double atr = atr_values[0];
+            
+            if(trade_type == ORDER_TYPE_BUY) {
+                stop_loss = entry_price - (atr * InpATRMultiplierSL);
+                take_profit = entry_price + (atr * InpATRMultiplierTP);
+            } else {
+                stop_loss = entry_price + (atr * InpATRMultiplierSL);
+                take_profit = entry_price - (atr * InpATRMultiplierTP);
+            }
+        }
+    } else {
+        // Pip-based SL/TP
+        double pip_value = _Point * 10; // Adjust for 5-digit brokers
+        
+        if(trade_type == ORDER_TYPE_BUY) {
+            stop_loss = entry_price - (InpStopLossPips * pip_value);
+            take_profit = entry_price + (InpTakeProfitPips * pip_value);
+        } else {
+            stop_loss = entry_price + (InpStopLossPips * pip_value);
+            take_profit = entry_price - (InpTakeProfitPips * pip_value);
+        }
+    }
+    
+    // Normalize prices
+    stop_loss = NormalizeDouble(stop_loss, _Digits);
+    take_profit = NormalizeDouble(take_profit, _Digits);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lot size based on risk                              |
+//+------------------------------------------------------------------+
+double CalculateLotSize(double entry_price, double stop_loss_price) {
+    if(!InpUseRiskBasedLots) {
+        return InpLotSize;
+    }
+    
+    double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double risk_amount = account_balance * InpRiskPercentage / 100.0;
+    
+    double pip_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double pip_size = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    
+    // Adjust for instruments with different pip values
+    if(_Symbol == "XAUUSD" || StringFind(_Symbol, "XAU") >= 0) {
+        pip_value = pip_value * 10; // Gold adjustment
+    }
+    
+    double stop_loss_pips = MathAbs(entry_price - stop_loss_price) / pip_size;
+    if(stop_loss_pips <= 0) return 0;
+    
+    double lot_size = risk_amount / (stop_loss_pips * pip_value);
+    
+    // Normalize lot size to broker's requirements
+    double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double max_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    
+    lot_size = MathMax(min_lot, MathMin(max_lot, lot_size));
+    lot_size = NormalizeDouble(lot_size / lot_step, 0) * lot_step;
+    
+    if(InpLogTradeDecisions) {
+        Print("💰 Risk Calculation: Balance=", account_balance, " Risk%=", InpRiskPercentage, 
+              " SL_Pips=", stop_loss_pips, " Lot=", lot_size);
+    }
+    
+    return lot_size;
+}
+
+//+------------------------------------------------------------------+
+//| Add trade to monitoring                                       |
+//+------------------------------------------------------------------+
+void AddTradeToMonitoring(ulong ticket, double entry_price, double stop_loss, double take_profit, 
+                         double lot_size, ENUM_ORDER_TYPE trade_type, string comment) {
+    int size = ArraySize(active_trades);
+    ArrayResize(active_trades, size + 1);
+    
+    active_trades[size].ticket = ticket;
+    active_trades[size].entry_price = entry_price;
+    active_trades[size].stop_loss = stop_loss;
+    active_trades[size].take_profit = take_profit;
+    active_trades[size].original_lot_size = lot_size;
+    active_trades[size].remaining_lot_size = lot_size;
+    active_trades[size].break_even_moved = false;
+    active_trades[size].trailing_active = false;
+    active_trades[size].tp1_hit = false;
+    active_trades[size].tp2_hit = false;
+    active_trades[size].tp3_hit = false;
+    active_trades[size].entry_time = TimeCurrent();
+    active_trades[size].trade_type = (trade_type == ORDER_TYPE_BUY) ? 0 : 1;
+    active_trades[size].comment = comment;
+}
+
+//+------------------------------------------------------------------+
+//| Manage existing trades                                        |
+//+------------------------------------------------------------------+
+void ManageExistingTrades() {
+    for(int i = ArraySize(active_trades) - 1; i >= 0; i--) {
+        if(!position.SelectByTicket(active_trades[i].ticket)) {
+            // Position closed, remove from array
+            RemoveTradeFromArray(i);
+            continue;
+        }
+        
+        // Handle partial take profits
+        if(InpUsePartialTP) {
+            HandlePartialTakeProfits(i);
+        }
+        
+        // Handle breakeven
+        if(InpUseBreakEven && !active_trades[i].break_even_moved) {
+            HandleBreakEven(i);
+        }
+        
+        // Handle trailing stop
+        if(InpUseTrailing && active_trades[i].break_even_moved) {
+            HandleTrailingStop(i);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Handle partial take profits                                   |
+//+------------------------------------------------------------------+
+void HandlePartialTakeProfits(int trade_index) {
+    if(!position.SelectByTicket(active_trades[trade_index].ticket)) return;
+    
+    double current_price = (active_trades[trade_index].trade_type == 0) ? 
+                          SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                          SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    
+    double entry_price = active_trades[trade_index].entry_price;
+    double stop_loss = active_trades[trade_index].stop_loss;
+    double risk_distance = MathAbs(entry_price - stop_loss);
+    
+    // Calculate profit in RR terms
+    double profit_distance = (active_trades[trade_index].trade_type == 0) ? 
+                            (current_price - entry_price) : 
+                            (entry_price - current_price);
+    
+    double current_rr = profit_distance / risk_distance;
+    
+    // TP1
+    if(!active_trades[trade_index].tp1_hit && current_rr >= InpTP1RR) {
+        double close_volume = active_trades[trade_index].remaining_lot_size * InpTP1Percentage / 100.0;
+        if(ExecutePartialClose(active_trades[trade_index].ticket, close_volume, "TP1")) {
+            active_trades[trade_index].tp1_hit = true;
+            active_trades[trade_index].remaining_lot_size -= close_volume;
+            Print("✅ TP1 Hit - Closed ", InpTP1Percentage, "% at RR:", DoubleToString(current_rr, 2));
+        }
+    }
+    
+    // TP2
+    if(active_trades[trade_index].tp1_hit && !active_trades[trade_index].tp2_hit && current_rr >= InpTP2RR) {
+        double close_volume = active_trades[trade_index].original_lot_size * InpTP2Percentage / 100.0;
+        if(ExecutePartialClose(active_trades[trade_index].ticket, close_volume, "TP2")) {
+            active_trades[trade_index].tp2_hit = true;
+            active_trades[trade_index].remaining_lot_size -= close_volume;
+            Print("✅ TP2 Hit - Closed ", InpTP2Percentage, "% at RR:", DoubleToString(current_rr, 2));
+        }
+    }
+    
+    // TP3 (close remaining position)
+    if(active_trades[trade_index].tp2_hit && !active_trades[trade_index].tp3_hit && current_rr >= InpTP3RR) {
+        if(ExecutePartialClose(active_trades[trade_index].ticket, active_trades[trade_index].remaining_lot_size, "TP3")) {
+            active_trades[trade_index].tp3_hit = true;
+            active_trades[trade_index].remaining_lot_size = 0;
+            Print("✅ TP3 Hit - Closed remaining position at RR:", DoubleToString(current_rr, 2));
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Execute partial close                                         |
+//+------------------------------------------------------------------+
+bool ExecutePartialClose(ulong ticket, double volume, string comment) {
+    if(volume <= 0) return false;
+    
+    // Normalize volume
+    double min_lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    volume = MathMax(min_lot, NormalizeDouble(volume / lot_step, 0) * lot_step);
+    
+    return trade.PositionClosePartial(ticket, volume);
+}
+
+//+------------------------------------------------------------------+
+//| Handle breakeven                                              |
+//+------------------------------------------------------------------+
+void HandleBreakEven(int trade_index) {
+    if(!position.SelectByTicket(active_trades[trade_index].ticket)) return;
+    
+    double current_price = (active_trades[trade_index].trade_type == 0) ? 
+                          SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                          SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    
+    double entry_price = active_trades[trade_index].entry_price;
+    double stop_loss = active_trades[trade_index].stop_loss;
+    
+    // Check if profit threshold is reached
+    bool should_move_be = false;
+    
+    if(InpUseATRStops) {
+        // RR-based breakeven
+        double risk_distance = MathAbs(entry_price - stop_loss);
+        double profit_distance = (active_trades[trade_index].trade_type == 0) ? 
+                                (current_price - entry_price) : 
+                                (entry_price - current_price);
+        
+        double current_rr = profit_distance / risk_distance;
+        should_move_be = (current_rr >= InpBreakEvenTriggerRR);
+    } else {
+        // Pip-based breakeven
+        double profit_pips = MathAbs(current_price - entry_price) / _Point;
+        should_move_be = (profit_pips >= InpBreakEvenTriggerPips);
+    }
+    
+    if(should_move_be) {
+        double new_sl = entry_price + (2 * _Point); // Small buffer past entry
+        new_sl = NormalizeDouble(new_sl, _Digits);
+        
+        if(trade.PositionModify(active_trades[trade_index].ticket, new_sl, position.TakeProfit())) {
+            active_trades[trade_index].break_even_moved = true;
+            active_trades[trade_index].stop_loss = new_sl;
+            Print("✅ Moved to breakeven - Ticket: ", active_trades[trade_index].ticket);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Handle trailing stop                                          |
+//+------------------------------------------------------------------+
+void HandleTrailingStop(int trade_index) {
+    if(!position.SelectByTicket(active_trades[trade_index].ticket)) return;
+    
+    double current_price = (active_trades[trade_index].trade_type == 0) ? 
+                          SymbolInfoDouble(_Symbol, SYMBOL_BID) : 
+                          SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    
+    double entry_price = active_trades[trade_index].entry_price;
+    double current_sl = position.StopLoss();
+    
+    // Calculate new trailing stop
+    double new_sl = current_sl;
+    bool should_trail = false;
+    
+    if(InpUseATRStops) {
+        // RR-based trailing
+        double risk_distance = MathAbs(entry_price - active_trades[trade_index].stop_loss);
+        double trail_distance = risk_distance * InpTrailingStepRR;
+        
+        if(active_trades[trade_index].trade_type == 0) { // Buy
+            new_sl = current_price - trail_distance;
+            should_trail = (new_sl > current_sl);
+        } else { // Sell
+            new_sl = current_price + trail_distance;
+            should_trail = (new_sl < current_sl);
+        }
+    } else {
+        // Pip-based trailing
+        double trail_distance = InpTrailingStepPips * _Point;
+        
+        if(active_trades[trade_index].trade_type == 0) { // Buy
+            new_sl = current_price - trail_distance;
+            should_trail = (new_sl > current_sl);
+        } else { // Sell
+            new_sl = current_price + trail_distance;
+            should_trail = (new_sl < current_sl);
+        }
+    }
+    
+    if(should_trail) {
+        new_sl = NormalizeDouble(new_sl, _Digits);
+        
+        if(trade.PositionModify(active_trades[trade_index].ticket, new_sl, position.TakeProfit())) {
+            active_trades[trade_index].stop_loss = new_sl;
+            Print("📈 Trailing stop updated - Ticket: ", active_trades[trade_index].ticket, " New SL: ", new_sl);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Update supply/demand zones (simplified)                       |
+//+------------------------------------------------------------------+
+void UpdateSupplyDemandZones() {
+    // Implement supply/demand zone detection logic
+    // This is a simplified version - you can enhance this based on your specific requirements
+    
+    double high[], low[], close[];
+    if(CopyHigh(_Symbol, InpConfirmationTF, 0, InpZoneLookback, high) < InpZoneLookback ||
+       CopyLow(_Symbol, InpConfirmationTF, 0, InpZoneLookback, low) < InpZoneLookback ||
+       CopyClose(_Symbol, InpConfirmationTF, 0, InpZoneLookback, close) < InpZoneLookback) return;
+    
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    ArraySetAsSeries(close, true);
+    
+    // Look for significant swing highs and lows
+    for(int i = 10; i < InpZoneLookback - 10; i++) {
+        // Supply zone detection (swing high)
+        bool is_swing_high = true;
+        for(int j = i - 5; j <= i + 5; j++) {
+            if(j != i && high[j] >= high[i]) {
+                is_swing_high = false;
+                break;
+            }
+        }
+        
+        if(is_swing_high) {
+            // Add supply zone
+            SupplyDemandZone zone;
+            zone.high = high[i] + 5 * _Point;
+            zone.low = high[i] - 20 * _Point;
+            zone.pivot_price = high[i];
+            zone.formation_time = iTime(_Symbol, InpConfirmationTF, i);
+            zone.is_supply = true;
+            zone.has_coc = false;
+            zone.awaiting_retracement = false;
+            zone.strength = InpZoneStrength;
+            zone.touch_count = 0;
+            
+            AddZoneToArray(zone);
+        }
+        
+        // Demand zone detection (swing low)
+        bool is_swing_low = true;
+        for(int j = i - 5; j <= i + 5; j++) {
+            if(j != i && low[j] <= low[i]) {
+                is_swing_low = false;
+                break;
+            }
+        }
+        
+        if(is_swing_low) {
+            // Add demand zone
+            SupplyDemandZone zone;
+            zone.high = low[i] + 20 * _Point;
+            zone.low = low[i] - 5 * _Point;
+            zone.pivot_price = low[i];
+            zone.formation_time = iTime(_Symbol, InpConfirmationTF, i);
+            zone.is_supply = false;
+            zone.has_coc = false;
+            zone.awaiting_retracement = false;
+            zone.strength = InpZoneStrength;
+            zone.touch_count = 0;
+            
+            AddZoneToArray(zone);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check for COC trades                                          |
+//+------------------------------------------------------------------+
+void CheckForCOCTrades() {
+    double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    for(int i = 0; i < ArraySize(identified_zones); i++) {
+        // Check if price is in zone
+        if(current_price >= identified_zones[i].low && current_price <= identified_zones[i].high) {
+            // Check for change of character and execute trade
+            if(CheckChangeOfCharacter(identified_zones[i])) {
+                ExecuteCOCTrade(identified_zones[i]);
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check change of character                                     |
+//+------------------------------------------------------------------+
+bool CheckChangeOfCharacter(SupplyDemandZone &zone) {
+    // Simplified COC detection
+    // You can enhance this with more sophisticated logic
+    
+    if(zone.is_supply) {
+        return (current_signals.rsi_bearish || current_signals.ema_bearish || 
+                current_signals.macd_bearish || current_signals.price_action_bearish);
+    } else {
+        return (current_signals.rsi_bullish || current_signals.ema_bullish || 
+                current_signals.macd_bullish || current_signals.price_action_bullish);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Execute COC trade                                             |
+//+------------------------------------------------------------------+
+void ExecuteCOCTrade(SupplyDemandZone &zone) {
+    ENUM_ORDER_TYPE trade_type = zone.is_supply ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+    ExecuteHighProbabilityTrade(trade_type, 4); // COC trades get high signal strength
+}
+
+//+------------------------------------------------------------------+
+//| Add zone to array                                             |
+//+------------------------------------------------------------------+
+void AddZoneToArray(SupplyDemandZone &zone) {
+    // Limit array size to prevent memory issues
+    if(ArraySize(identified_zones) >= 50) return;
+    
+    int size = ArraySize(identified_zones);
+    ArrayResize(identified_zones, size + 1);
+    identified_zones[size] = zone;
+}
+
+//+------------------------------------------------------------------+
+//| Remove trade from array                                       |
+//+------------------------------------------------------------------+
+void RemoveTradeFromArray(int index) {
+    if(index < 0 || index >= ArraySize(active_trades)) return;
+    
+    for(int i = index; i < ArraySize(active_trades) - 1; i++) {
+        active_trades[i] = active_trades[i + 1];
+    }
+    ArrayResize(active_trades, ArraySize(active_trades) - 1);
+}
+
+//+------------------------------------------------------------------+
+//| Update counters                                               |
+//+------------------------------------------------------------------+
+void UpdateCounters() {
+    datetime current_time = TimeCurrent();
+    MqlDateTime dt;
+    TimeToStruct(current_time, dt);
+    
+    // Reset daily counter
+    datetime current_date = current_time - (current_time % 86400);
+    if(current_date != last_trade_date) {
+        trades_today = 0;
+        last_trade_date = current_date;
+        if(InpEnableDebugLogs) Print("📅 New trading day - Counters reset");
+    }
+    
+    // Reset hourly counter
+    datetime current_hour = current_time - (current_time % 3600);
+    if(current_hour != last_hour_reset) {
+        trades_this_hour = 0;
+        last_hour_reset = current_hour;
+        if(InpEnableDebugLogs) Print("🕐 New trading hour - Hour counter reset");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Reset counters                                                |
+//+------------------------------------------------------------------+
+void ResetCounters() {
+    trades_today = 0;
+    trades_this_hour = 0;
+    last_trade_date = TimeCurrent() - (TimeCurrent() % 86400);
+    last_hour_reset = TimeCurrent() - (TimeCurrent() % 3600);
+    last_trade_time = 0;
+}
+
+//+------------------------------------------------------------------+
+//| ================= ML TREND FILTER (WebRequest) ================== |
+//+------------------------------------------------------------------+
+void OnTimer() {
+    if(TimeLocal() - nexa_license_checked_at >= 300) {
+        nexa_license_valid = ValidateNexaLicense();
+        if(!nexa_license_valid) Print("[NEXA][LICENSE] New trades are disabled until account verification succeeds");
+    }
+    datetime now = TimeLocal();
+    bool retry_due = ml_retry_at > 0 && now >= ml_retry_at;
+    bool refresh_due = ml_retry_at == 0 &&
+        (ml_last_update == 0 || now-ml_last_update >= MathMax(1,InpMLRefreshSeconds));
+    if(retry_due || refresh_due) UpdateMLTrend();
+    UpdateDashboard();
+}
+
+bool IsTesting() { return (bool)MQLInfoInteger(MQL_TESTER) || (bool)MQLInfoInteger(MQL_OPTIMIZATION); }
+
+string BaseURL() {
+    string u = InpMLBaseURL;
+    StringTrimLeft(u);
+    StringTrimRight(u);
+    while(StringLen(u) > 0 && StringSubstr(u, StringLen(u)-1) == "/") u = StringSubstr(u, 0, StringLen(u)-1);
+    return u;
+}
+
+string MLBaseURLProblem() {
+    string url = BaseURL();
+    string scheme = StringSubstr(url, 0, 8);
+    StringToLower(scheme);
+    if(scheme != "https://")
+        return "Invalid ML base URL: HTTPS is required";
+
+    string authority = StringSubstr(url, 8);
+    int path_start = StringFind(authority, "/");
+    int query_start = StringFind(authority, "?");
+    int fragment_start = StringFind(authority, "#");
+    int authority_end = StringLen(authority);
+    if(path_start >= 0 && path_start < authority_end) authority_end = path_start;
+    if(query_start >= 0 && query_start < authority_end) authority_end = query_start;
+    if(fragment_start >= 0 && fragment_start < authority_end) authority_end = fragment_start;
+    authority = StringSubstr(authority, 0, authority_end);
+    if(authority == "" || StringFind(authority, "@") >= 0 || StringFind(authority, "[") >= 0)
+        return "Invalid ML base URL: enter an HTTPS hostname, not an IP or credential URL";
+
+    string host = authority;
+    int port_separator = StringFind(host, ":");
+    if(port_separator >= 0) {
+        if(StringFind(host, ":", port_separator+1) >= 0)
+            return "Invalid ML base URL: IPv6/IP-literal hosts are not supported";
+        string port_text = StringSubstr(host, port_separator+1);
+        if(port_text == "")
+            return "Invalid ML base URL: port is empty";
+        for(int i=0; i<StringLen(port_text); i++) {
+            ushort digit = StringGetCharacter(port_text, i);
+            if(digit < '0' || digit > '9')
+                return "Invalid ML base URL: port must be numeric";
+        }
+        int port = (int)StringToInteger(port_text);
+        if(port < 1 || port > 65535)
+            return "Invalid ML base URL: port must be between 1 and 65535";
+        host = StringSubstr(host, 0, port_separator);
+    }
+
+    if(host == "")
+        return "Invalid ML base URL: enter a valid DNS hostname";
+    if(StringFind(host, "..") >= 0 ||
+       StringSubstr(host, 0, 1) == "." || StringSubstr(host, StringLen(host)-1) == ".")
+        return "Invalid ML base URL: enter a valid DNS hostname";
+    bool has_letter = false;
+    for(int i=0; i<StringLen(host); i++) {
+        ushort ch = StringGetCharacter(host, i);
+        bool valid_character = (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+            ch == '.' || ch == '-';
+        if(!valid_character)
+            return "Invalid ML base URL: hostname contains an invalid character";
+        if((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) has_letter = true;
+    }
+    if(!has_letter)
+        return "Invalid ML base URL: enter a DNS hostname, not an IP address";
+    return "";
+}
+
+string SafeMLDiagnosticText(string text) {
+    if(InpMLApiKey != "")
+        StringReplace(text, InpMLApiKey, "[REDACTED]");
+    StringReplace(text, "\r", " ");
+    StringReplace(text, "\n", " ");
+    string lower = text;
+    StringToLower(lower);
+    int bearer = StringFind(lower, "bearer ");
+    if(bearer >= 0) {
+        int value_start = bearer + 7;
+        int value_end = value_start;
+        while(value_end < StringLen(text)) {
+            ushort ch = StringGetCharacter(text, value_end);
+            if(ch == ' ' || ch == '\t' || ch == '"' || ch == '\'' || ch == ',' || ch == ';')
+                break;
+            value_end++;
+        }
+        text = StringSubstr(text, 0, value_start) + "[REDACTED]" + StringSubstr(text, value_end);
+    }
+    string secret_fields[] = {"\"api_key\"", "\"api-key\"", "\"x-api-key\"",
+        "\"authorization\"", "\"access_token\"", "\"token\"", "\"secret\"", "\"password\""};
+    for(int i=0; i<ArraySize(secret_fields); i++) {
+        lower = text;
+        StringToLower(lower);
+        int field = StringFind(lower, secret_fields[i]);
+        if(field < 0) continue;
+        int value_start = StringFind(text, ":", field + StringLen(secret_fields[i]));
+        if(value_start < 0) continue;
+        value_start++;
+        while(value_start < StringLen(text) &&
+              (StringGetCharacter(text,value_start)==' ' || StringGetCharacter(text,value_start)=='\t'))
+            value_start++;
+        bool quoted = value_start < StringLen(text) &&
+            (StringGetCharacter(text,value_start)=='"' || StringGetCharacter(text,value_start)=='\'');
+        if(quoted) value_start++;
+        int value_end = value_start;
+        while(value_end < StringLen(text)) {
+            ushort ch = StringGetCharacter(text,value_end);
+            if(ch == ',' || ch == '}' || ch == '&' || ch == '"' || ch == '\'' ||
+               ch == ' ' || ch == '\t')
+                break;
+            value_end++;
+        }
+        text = StringSubstr(text,0,value_start) + "[REDACTED]" + StringSubstr(text,value_end);
+    }
+    return text;
+}
+
+string SafeRedirectLocation(string headers) {
+    string lines[];
+    int count = StringSplit(headers, '\n', lines);
+    for(int i=0; i<count; i++) {
+        string line = lines[i];
+        StringTrimLeft(line);
+        StringTrimRight(line);
+        string lower = line;
+        StringToLower(lower);
+        if(StringFind(lower, "location:") != 0) continue;
+        string location = StringSubstr(line, StringLen("location:"));
+        StringTrimLeft(location);
+        int cut = StringFind(location, "?");
+        if(cut < 0) cut = StringFind(location, "#");
+        if(cut >= 0) location = StringSubstr(location, 0, cut);
+        int scheme_end = StringFind(location, "://");
+        if(scheme_end >= 0) {
+            int authority_start = scheme_end + 3;
+            int authority_end = StringFind(location, "/", authority_start);
+            if(authority_end < 0) authority_end = StringLen(location);
+            int user_info = StringFind(location, "@", authority_start);
+            if(user_info >= 0 && user_info < authority_end)
+                location = StringSubstr(location,0,authority_start) +
+                    StringSubstr(location,user_info+1);
+        }
+        return SafeMLDiagnosticText(location);
+    }
+    return "";
+}
+
+int HttpRequest(string method, string path, string body, string &response, string &response_headers) {
+    char post[], result[];
+    string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
+    if(InpMLApiKey != "") headers += "x-api-key: " + InpMLApiKey + "\r\n";
+    if(body != "") StringToCharArray(body, post, 0, StringLen(body), CP_UTF8);
+    string request_url = BaseURL() + path;
+    ResetLastError();
+    int timeout_ms = (int)MathMax(500, InpMLTimeoutMs);
+    Print("[ML DEBUG] URL=", request_url);
+    Print("[ML DEBUG] METHOD=", method);
+    Print("[ML DEBUG] TIMEOUT=", timeout_ms);
+    int code = WebRequest(method, request_url, headers, timeout_ms, post, result, response_headers);
+    response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+    Print("[ML DEBUG] HTTP_STATUS=", code);
+    if(code != 200) {
+        Print("[ML DEBUG] RESPONSE=", StringSubstr(SafeMLDiagnosticText(response),0,1000));
+        string redirect_location = SafeRedirectLocation(response_headers);
+        if(redirect_location != "")
+            Print("[ML DEBUG] RESPONSE_LOCATION=", redirect_location);
+    }
+    if(code == -1) {
+        int err = GetLastError();
+        if(err == 4014)
+            response = "WebRequest blocked: allow " + BaseURL() + " in MT5 Expert Advisors settings";
+        else if(err == 5201)
+            response = "DNS/hostname or network connection failure (MT5 error 5201)";
+        else if(err == 5202)
+            response = "ML request timed out (MT5 error 5202)";
+        else if(err == 5203)
+            response = "ML HTTP request failed (MT5 error 5203)";
+        else
+            response = "WebRequest failed (MT5 error " + IntegerToString(err) + ")";
+    }
+    return code;
+}
+
+string SafeResponseHeaderDetails(string headers) {
+    string lines[];
+    int count = StringSplit(headers, '\n', lines);
+    string details = "";
+    for(int i=0; i<count; i++) {
+        string line = lines[i];
+        StringTrimLeft(line);
+        StringTrimRight(line);
+        StringToLower(line);
+        bool safe_header =
+            StringFind(line,"content-type:")==0 ||
+            StringFind(line,"server:")==0 ||
+            StringFind(line,"retry-after:")==0 ||
+            StringFind(line,"x-request-id:")==0 ||
+            StringFind(line,"cf-ray:")==0;
+        if(!safe_header) continue;
+        if(details!="") details+="; ";
+        details+=line;
+    }
+    return details;
+}
+
+string JsonValue(string json, string key) {
+    string k = "\"" + key + "\"";
+    int p = StringFind(json, k);
+    if(p < 0) return "";
+    p = StringFind(json, ":", p + StringLen(k));
+    if(p < 0) return "";
+    p++;
+    while(p < StringLen(json) && (StringGetCharacter(json,p) == ' ')) p++;
+    if(StringGetCharacter(json, p) == '"') {
+        int e = StringFind(json, "\"", p+1);
+        return StringSubstr(json, p+1, e-p-1);
+    }
+    int e = p;
+    while(e < StringLen(json)) { ushort ch = StringGetCharacter(json,e); if(ch==',' || ch=='}' || ch==']') break; e++; }
+    string v = StringSubstr(json, p, e-p); StringTrimLeft(v); StringTrimRight(v);
+    return v;
+}
+
+string CandlesJson(ENUM_TIMEFRAMES tf, int count) {
+    MqlRates r[];
+    ArraySetAsSeries(r, false);
+    int n = CopyRates(_Symbol, tf, 1, count, r);
+    if(n < 260) return "";
+    int d = _Digits;
+    string s = "[";
+    for(int i = 0; i < n; i++) {
+        if(i > 0) s += ",";
+        MqlDateTime candle_time;
+        TimeToStruct(r[i].time,candle_time);
+        string timestamp=StringFormat("%04d-%02d-%02dT%02d:%02d:%02dZ",
+            candle_time.year,candle_time.mon,candle_time.day,
+            candle_time.hour,candle_time.min,candle_time.sec);
+        s += "{\"timestamp\":\"" + timestamp + "\""
+           + ",\"open\":"  + DoubleToString(r[i].open, d)
+           + ",\"high\":"  + DoubleToString(r[i].high, d)
+           + ",\"low\":"   + DoubleToString(r[i].low, d)
+           + ",\"close\":" + DoubleToString(r[i].close, d)
+           + ",\"volume\":" + IntegerToString(r[i].tick_volume) + "}";
+    }
+    return s + "]";
+}
+
+void RecordMLTrendFailure(string reason) {
+    reason = SafeMLDiagnosticText(reason);
+    ml_predict_ok = false;
+    ml_trend = 0;
+    ml_server_online = false;
+    ml_last_error = reason;
+    ml_consecutive_failures = (int)MathMin(ml_consecutive_failures+1,5);
+    int retry_delay = 5;
+    for(int attempt=1; attempt<ml_consecutive_failures; attempt++)
+        retry_delay = (int)MathMin(60,retry_delay*2);
+    ml_retry_at = TimeLocal()+retry_delay;
+    ml_connection_stage = "RETRY WAIT | " + reason;
+    if(InpEnableDebugLogs)
+        Print("ML EA 1.0 | ",reason," | retry in ",retry_delay," seconds (failure ",
+              ml_consecutive_failures,")");
+}
+
+void UpdateMLTrend() {
+    ml_last_update = TimeLocal();
+    ml_predict_ok = false;
+    ml_trend = 0;
+    ml_server_online = false;
+    ml_health_reached = false;
+    if(IsTesting()) {
+        ml_last_error = "WebRequest unavailable in Strategy Tester";
+        ml_connection_stage = "WEBREQUEST UNAVAILABLE IN TESTER";
+        ml_retry_at = 0;
+        return;
+    }
+    string url_problem = MLBaseURLProblem();
+    if(url_problem != "") {
+        RecordMLTrendFailure(url_problem);
+        return;
+    }
+    if(InpMLApiKey == "") {
+        RecordMLTrendFailure("Set InpMLApiKey to the current Render INGEST_API_KEY");
+        return;
+    }
+
+    ml_connection_stage = "CHECKING /HEALTH";
+    string health_body = "";
+    string health_headers = "";
+    int health_code = HttpRequest("GET", "/health", "", health_body, health_headers);
+    if(health_code != 200) {
+        if(health_code == -1) {
+            RecordMLTrendFailure("ML health check: " + health_body);
+            return;
+        }
+        string health_detail = health_body != "" ? StringSubstr(health_body,0,180) : "empty response";
+        StringReplace(health_detail,"\r"," ");
+        StringReplace(health_detail,"\n"," ");
+        if(health_code==1003)
+            health_detail="Cloudflare HTTP 1003 rejected the request; verify configured hostname and Cloudflare routing";
+        RecordMLTrendFailure("ML health check HTTP " + IntegerToString(health_code) +
+            " | " + health_detail);
+        return;
+    }
+    ml_server_online = true;
+    ml_health_reached = true;
+    ml_connection_stage = "HEALTH OK | BUILDING H1/M15 REQUEST";
+
+    string h1 = CandlesJson(PERIOD_H1, 300), m15 = CandlesJson(PERIOD_M15, 300);
+    if(h1 == "" || m15 == "") {
+        RecordMLTrendFailure("Not enough H1/M15 history (need 260+ candles)");
+        return;
+    }
+    string sym = (InpMLSymbolOverride != "" ? InpMLSymbolOverride : _Symbol);
+    string body = "{\"symbol\":\"" + sym + "\",\"h1_candles\":" + h1 + ",\"m15_candles\":" + m15 + "}";
+
+    ml_connection_stage = "HEALTH OK | POSTING CONSENSUS";
+    string resp;
+    string response_headers = "";
+    int code = HttpRequest("POST", "/api/ml/predict/consensus", body, resp, response_headers);
+    if(code != 200) {
+        if(code == -1) {
+            RecordMLTrendFailure("ML consensus request: " + resp);
+            return;
+        }
+        string det = JsonValue(resp, "detail");
+        string body_detail = det != "" ? det : StringSubstr(resp, 0, 240);
+        StringReplace(body_detail,"\r"," ");
+        StringReplace(body_detail,"\n"," ");
+        string header_detail = SafeResponseHeaderDetails(response_headers);
+        string reason;
+        if(code==1003) {
+            reason="Cloudflare HTTP 1003 rejected the request; verify configured hostname and Cloudflare routing";
+            ml_connection_stage="CLOUDFLARE HTTP 1003 | CHECK HOSTNAME ROUTING";
+        } else if(code == 401 || code == 403) {
+            reason = "ML API authentication/authorization error HTTP " + IntegerToString(code);
+        } else if(code >= 500) {
+            reason = "ML API unavailable HTTP " + IntegerToString(code);
+        } else if(code >= 1000 || code < -1)
+            reason = "Non-standard HTTP status " + IntegerToString(code);
+        else
+            reason = "HTTP " + IntegerToString(code);
+        if(body_detail!="") reason+=" | body: "+body_detail;
+        else reason+=" | empty response body";
+        if(header_detail!="") reason+=" | headers: "+header_detail;
+        RecordMLTrendFailure(reason);
+        return;
+    }
+    string raw = JsonValue(resp, "trend_direction");
+    StringTrimLeft(raw);
+    StringTrimRight(raw);
+    StringToUpper(raw);
+    int t = raw == "BUY" ? 1 : (raw == "SELL" ? -1 : (raw == "RANGE" ? 0 : 99));
+    if(t == 99) {
+        ml_raw_trend = raw == "" ? "missing" : raw;
+        RecordMLTrendFailure("ML response has no valid trend_direction: "+ml_raw_trend);
+        return;
+    }
+
+    string conf = JsonValue(resp, "confidence");
+    if(conf == "") conf = JsonValue(resp, "probability");
+    ml_confidence = StringToDouble(conf);
+    if(ml_confidence > 0 && ml_confidence <= 1.0) ml_confidence *= 100.0;
+    ml_trend = t; ml_raw_trend = raw; ml_predict_ok = true; ml_server_online = true; ml_last_error = "OK";
+    ml_consecutive_failures = 0;
+    ml_retry_at = 0;
+    ml_connection_stage = "CONNECTED | HEALTH + H1/M15 INFERENCE OK";
+    if(InpEnableDebugLogs) Print("ML EA 1.0 | ML H1 trend_direction: ", TrendText(ml_trend), " (", raw, ") conf ", DoubleToString(ml_confidence,1), "%");
+}
+
+string TrendText(int t) { return t == 1 ? "BULLISH" : (t == -1 ? "BEARISH" : "NEUTRAL"); }
+
+bool MLTrendAllows(ENUM_ORDER_TYPE type) {
+    string dir = (type == ORDER_TYPE_BUY ? "BUY" : "SELL");
+    if(!ml_predict_ok) {
+        trades_blocked_ml++;
+        last_decision = dir + " BLOCKED - valid ML trend unavailable";
+        Print("ML EA 1.0 | ", last_decision);
+        return false;
+    }
+    bool ok = (type == ORDER_TYPE_BUY && ml_trend == 1) || (type == ORDER_TYPE_SELL && ml_trend == -1);
+    if(ok) { trades_approved_ml++; last_decision = dir + " APPROVED - indicators agree with ML " + TrendText(ml_trend); }
+    else   { trades_blocked_ml++;  last_decision = dir + " BLOCKED - ML trend is " + TrendText(ml_trend); }
+    Print("ML EA 1.0 | ", last_decision);
+    return ok;
+}
+
+//+------------------------------------------------------------------+
+//| ========================= DASHBOARD ============================= |
+//+------------------------------------------------------------------+
+void DashRect(string name, int x, int y, int w, int h, color bg, color border) {
+    string n = DASH + name;
+    if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+    ObjectSetInteger(0, n, OBJPROP_XSIZE, w);     ObjectSetInteger(0, n, OBJPROP_YSIZE, h);
+    ObjectSetInteger(0, n, OBJPROP_BGCOLOR, bg);  ObjectSetInteger(0, n, OBJPROP_COLOR, border);
+    ObjectSetInteger(0, n, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+    ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false); ObjectSetInteger(0, n, OBJPROP_HIDDEN, true);
+    ObjectSetInteger(0, n, OBJPROP_BACK, false);
+}
+
+void DashText(string name, int x, int y, string text, color clr, int size = 9, string font = "Segoe UI") {
+    string n = DASH + name;
+    if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+    ObjectSetString(0, n, OBJPROP_TEXT, text);    ObjectSetString(0, n, OBJPROP_FONT, font);
+    ObjectSetInteger(0, n, OBJPROP_FONTSIZE, size); ObjectSetInteger(0, n, OBJPROP_COLOR, clr);
+    ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false); ObjectSetInteger(0, n, OBJPROP_HIDDEN, true);
+}
+
+#define DX 12
+#define DY 25
+#define DW 450
+#define DH 526
+
+color DashGold()  { return C'214,167,84'; }
+color DashBg()    { return C'13,15,18'; }
+color DashPanel() { return C'21,24,29'; }
+color DashBorder(){ return C'52,57,65'; }
+color DashTextColor() { return C'233,236,241'; }
+color DashMuted() { return C'146,152,163'; }
+color DashGreen() { return C'52,211,153'; }
+color DashRed()   { return C'248,113,113'; }
+color DashAmber() { return C'241,196,15'; }
+
+void CreateDashboard() {
+    if(!InpShowDashboard) return;
+    color gold = DashGold();
+    color panel = DashPanel();
+    color border = DashBorder();
+    color muted = DashMuted();
+
+    DashRect("bg", DX, DY, DW, DH, DashBg(), border);
+    DashRect("header", DX+1, DY+1, DW-2, 48, C'20,23,28', border);
+    DashRect("header_line", DX+1, DY+48, DW-2, 2, gold, gold);
+    DashText("brand", DX+18, DY+9, "NEXA AI", gold, 14, "Segoe UI Semibold");
+    DashText("subtitle", DX+18, DY+30, "ML TREND  /  INDICATOR ENTRY", muted, 8);
+    DashText("version", DX+254, DY+13, "BUILD 1.05", muted, 8, "Segoe UI Semibold");
+
+    DashRect("ml_card", DX+18, DY+62, DW-36, 132, panel, border);
+    DashText("ml_section", DX+30, DY+72, "H1 LEARNED TREND", gold, 8, "Segoe UI Semibold");
+    DashText("trend_value", DX+30, DY+91, "WAITING FOR ML", muted, 19, "Segoe UI Semibold");
+    DashText("confidence", DX+300, DY+94, "MODEL --", muted, 9, "Segoe UI Semibold");
+    DashText("server_detail", DX+30, DY+128, "API HOST: "+BaseURL(), muted, 8);
+    DashText("trend_error", DX+30, DY+148, "Waiting for the first health and inference check", DashAmber(), 7);
+    DashText("trend_error_detail", DX+30, DY+160, "", DashAmber(), 7);
+    DashText("connection_stage", DX+30, DY+173, "CONNECTION: BUILD 1.05 READY", muted, 7, "Segoe UI Semibold");
+
+    DashText("entry_section", DX+18, DY+204, "INDICATOR ENTRY CONFIRMATION", gold, 9, "Segoe UI Semibold");
+    DashRect("indicator_card", DX+18, DY+224, DW-36, 105, panel, border);
+    DashText("indicator_summary", DX+30, DY+235, "BUY 0/4     SELL 0/4", DashTextColor(), 10, "Segoe UI Semibold");
+    DashText("rsi_label", DX+30, DY+261, "RSI  --", muted, 8, "Segoe UI Semibold");
+    DashText("ema_label", DX+128, DY+261, "EMA  --", muted, 8, "Segoe UI Semibold");
+    DashText("macd_label", DX+226, DY+261, "MACD  --", muted, 8, "Segoe UI Semibold");
+    DashText("pa_label", DX+324, DY+261, "PRICE ACTION  --", muted, 7, "Segoe UI Semibold");
+    DashRect("entry_pill", DX+30, DY+284, DW-60, 30, C'35,38,43', border);
+    DashText("alignment", DX+42, DY+293, "WAITING FOR ML TREND", muted, 8, "Segoe UI Semibold");
+
+    DashText("activity_section", DX+18, DY+342, "ACCOUNT ACTIVITY", gold, 9, "Segoe UI Semibold");
+    DashRect("activity_card", DX+18, DY+362, DW-36, 66, panel, border);
+    DashText("trades_caption", DX+30, DY+372, "TRADES TODAY", muted, 7, "Segoe UI Semibold");
+    DashText("trades_value", DX+30, DY+390, "0 / 0", DashTextColor(), 12, "Segoe UI Semibold");
+    DashText("positions_caption", DX+163, DY+372, "OPEN POSITIONS", muted, 7, "Segoe UI Semibold");
+    DashText("positions_value", DX+163, DY+390, "0", DashTextColor(), 12, "Segoe UI Semibold");
+    DashText("equity_caption", DX+292, DY+372, "EQUITY", muted, 7, "Segoe UI Semibold");
+    DashText("equity_value", DX+292, DY+390, "--", DashTextColor(), 12, "Segoe UI Semibold");
+
+    DashRect("decision_card", DX+18, DY+438, DW-36, 52, panel, border);
+    DashText("decision_caption", DX+30, DY+445, "LAST DECISION", gold, 7, "Segoe UI Semibold");
+    DashText("decision_value", DX+30, DY+460, "Waiting for indicator setup", DashTextColor(), 8);
+    DashRect("footer_line", DX+18, DY+501, DW-36, 1, border, border);
+    DashText("footer_left", DX+18, DY+507, _Symbol+"  |  "+EnumToString(PERIOD_CURRENT), muted, 7);
+    DashText("footer_right", DX+250, DY+507, "UPDATED --", muted, 7);
+    ChartRedraw();
+}
+
+string IndicatorSideText(bool bullish, bool bearish) {
+    if(bullish) return "BUY";
+    if(bearish) return "SELL";
+    return "--";
+}
+
+void UpdateDashboard() {
+    if(!InpShowDashboard) return;
+    color green = DashGreen(), red = DashRed(), amber = DashAmber();
+    color white = DashTextColor(), grey = DashMuted(), gold = DashGold();
+    bool connected = ml_server_online && ml_predict_ok;
+    bool health_reached = ml_health_reached;
+    int bullish = (int)current_signals.rsi_bullish + (int)current_signals.ema_bullish +
+        (int)current_signals.macd_bullish + (int)current_signals.price_action_bullish;
+    int bearish = (int)current_signals.rsi_bearish + (int)current_signals.ema_bearish +
+        (int)current_signals.macd_bearish + (int)current_signals.price_action_bearish;
+    bool ready_buy = ml_predict_ok && ml_trend == 1 && bullish >= 3;
+    bool ready_sell = ml_predict_ok && ml_trend == -1 && bearish >= 3;
+    bool entry_ready = ready_buy || ready_sell;
+    color trend_color = !ml_predict_ok ? grey : (ml_trend == 1 ? green : (ml_trend == -1 ? red : amber));
+    color status_color = connected ? green : (health_reached ? amber : red);
+    string trend_text = !ml_predict_ok ? "WAITING FOR ML" : (ml_trend == 1 ? "BUY TREND" : (ml_trend == -1 ? "SELL TREND" : "RANGE"));
+    string trend_detail = "API HOST: "+BaseURL();
+    string alignment_text = entry_ready
+        ? (ready_buy ? "ENTRY READY  |  BUY signals agree with ML BUY" : "ENTRY READY  |  SELL signals agree with ML SELL")
+        : (!ml_predict_ok ? "NO ENTRY  |  waiting for a valid ML trend"
+        : (ml_trend == 0 ? "NO ENTRY  |  ML trend is RANGE"
+        : StringFormat("NO ENTRY  |  need %s indicators to confirm ML %s",
+            ml_trend == 1 ? "BUY" : "SELL", ml_trend == 1 ? "BUY" : "SELL")));
+    color alignment_color = entry_ready ? green : red;
+
+    DashRect("status_pill", DX+337, DY+12, 96, 22,
+        connected ? C'22,53,43' : (health_reached ? C'61,49,27' : C'59,34,37'), status_color);
+    DashText("status_text", DX+343, DY+18,
+        connected ? "ML CONNECTED" : (health_reached ? "API CHECK" : "ML OFFLINE"),
+        status_color, 7, "Segoe UI Semibold");
+    DashText("trend_value", DX+30, DY+91, trend_text, trend_color, 19, "Segoe UI Semibold");
+    DashText("confidence", DX+300, DY+94,
+        ml_predict_ok && ml_confidence > 0 ? "MODEL "+DoubleToString(ml_confidence,1)+"%" : "MODEL --",
+        ml_predict_ok ? gold : grey, 9, "Segoe UI Semibold");
+    string connection_error = ml_predict_ok
+        ? "Inference OK  |  H1 trend must match entry signals"
+        : ml_last_error;
+    if(!ml_predict_ok && StringFind(connection_error,"1003")>=0)
+        connection_error += " | Check API HOST and Cloudflare hostname routing";
+    DashText("server_detail", DX+30, DY+128, trend_detail, gold, 8);
+    DashText("trend_error", DX+30, DY+148,
+        StringSubstr(connection_error,0,78),
+        ml_predict_ok ? green : amber, 7);
+    DashText("trend_error_detail", DX+30, DY+160,
+        StringSubstr(connection_error,78,78),
+        ml_predict_ok ? green : amber, 7);
+    DashText("connection_stage", DX+30, DY+173,
+        StringSubstr("CONNECTION: "+(health_reached && !connected
+            ? "HEALTH OK; INFERENCE FAILED"
+            : ml_connection_stage),0,76),
+        connected ? green : (health_reached ? amber : red), 7, "Segoe UI Semibold");
+
+    DashText("indicator_summary", DX+30, DY+235,
+        StringFormat("BUY %d/4     SELL %d/4", bullish, bearish),
+        bullish > bearish ? green : (bearish > bullish ? red : amber), 10, "Segoe UI Semibold");
+    DashText("rsi_label", DX+30, DY+261,
+        "RSI  "+IndicatorSideText(current_signals.rsi_bullish,current_signals.rsi_bearish),
+        current_signals.rsi_bullish ? green : (current_signals.rsi_bearish ? red : grey), 8, "Segoe UI Semibold");
+    DashText("ema_label", DX+128, DY+261,
+        "EMA  "+IndicatorSideText(current_signals.ema_bullish,current_signals.ema_bearish),
+        current_signals.ema_bullish ? green : (current_signals.ema_bearish ? red : grey), 8, "Segoe UI Semibold");
+    DashText("macd_label", DX+226, DY+261,
+        "MACD  "+IndicatorSideText(current_signals.macd_bullish,current_signals.macd_bearish),
+        current_signals.macd_bullish ? green : (current_signals.macd_bearish ? red : grey), 8, "Segoe UI Semibold");
+    DashText("pa_label", DX+324, DY+261,
+        "PRICE ACTION  "+IndicatorSideText(current_signals.price_action_bullish,current_signals.price_action_bearish),
+        current_signals.price_action_bullish ? green : (current_signals.price_action_bearish ? red : grey), 7, "Segoe UI Semibold");
+    DashRect("entry_pill", DX+30, DY+284, DW-60, 30,
+        entry_ready ? C'22,53,43' : C'47,39,29', entry_ready ? green : amber);
+    DashText("alignment", DX+42, DY+293, alignment_text,
+        entry_ready ? green : (ml_predict_ok ? amber : red), 8, "Segoe UI Semibold");
+
+    DashText("trades_value", DX+30, DY+390,
+        IntegerToString(trades_today)+" / "+IntegerToString(InpMaxTradesPerDay), white, 12, "Segoe UI Semibold");
+    DashText("positions_value", DX+163, DY+390,
+        IntegerToString(PositionsTotal()), white, 12, "Segoe UI Semibold");
+    DashText("equity_value", DX+292, DY+390,
+        DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)+" "+AccountInfoString(ACCOUNT_CURRENCY),
+        white, 10, "Segoe UI Semibold");
+    DashText("decision_value", DX+30, DY+460,
+        StringSubstr(last_decision, 0, 76), white, 8);
+    DashText("footer_right", DX+250, DY+507,
+        ml_last_update > 0 ? "UPDATED "+TimeToString(ml_last_update,TIME_MINUTES|TIME_SECONDS) : "UPDATED --",
+        grey, 7);
+    DashText("footer_left", DX+18, DY+507, _Symbol+"  |  "+EnumToString(PERIOD_CURRENT), grey, 7);
+    ChartRedraw();
+}
