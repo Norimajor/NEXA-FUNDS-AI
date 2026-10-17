@@ -37,7 +37,7 @@ bool InpLogRejectedDecisions=true, InpShowDashboard=true;
 ENUM_BASE_CORNER InpDashboardCorner=CORNER_LEFT_UPPER;
 const int InpDashboardX=16, InpDashboardY=24;
 const string ML_RENDER_BASE_URL="https://nexa-funds-ai.onrender.com";
-int runtime_ml_timeout_ms=5000, runtime_ml_check_seconds=5, runtime_prediction_max_age_seconds=30;
+int runtime_ml_timeout_ms=30000, runtime_ml_check_seconds=30, runtime_prediction_max_age_seconds=30;
 int runtime_refresh_ms=100, runtime_max_daily=40, runtime_max_hourly=10;
 int runtime_min_trade_minutes=2, runtime_max_positions=2, runtime_scalp_max_positions=20;
 bool runtime_spread_filter=false;
@@ -2248,7 +2248,7 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
     else if(key=="SpreadMinus")runtime_max_spread_pips=MathMax(0.1,runtime_max_spread_pips-0.1); else if(key=="SpreadPlus")runtime_max_spread_pips=MathMin(100.0,runtime_max_spread_pips+0.1);
     else if(key=="OffsetMinus")runtime_broker_utc_offset=(int)MathMax(-23,runtime_broker_utc_offset-1); else if(key=="OffsetPlus")runtime_broker_utc_offset=(int)MathMin(23,runtime_broker_utc_offset+1);
     else if(key=="MLPollMinus")runtime_ml_check_seconds=(int)MathMax(1,runtime_ml_check_seconds-1); else if(key=="MLPollPlus")runtime_ml_check_seconds=(int)MathMin(60,runtime_ml_check_seconds+1);
-    else if(key=="TimeoutMinus")runtime_ml_timeout_ms=(int)MathMax(500,runtime_ml_timeout_ms-250); else if(key=="TimeoutPlus")runtime_ml_timeout_ms=(int)MathMin(5000,runtime_ml_timeout_ms+250);
+    else if(key=="TimeoutMinus")runtime_ml_timeout_ms=(int)MathMax(500,runtime_ml_timeout_ms-250); else if(key=="TimeoutPlus")runtime_ml_timeout_ms=(int)MathMin(30000,runtime_ml_timeout_ms+250);
     else if(key=="FreshnessMinus")runtime_prediction_max_age_seconds=(int)MathMax(5,runtime_prediction_max_age_seconds-5); else if(key=="FreshnessPlus")runtime_prediction_max_age_seconds=(int)MathMin(120,runtime_prediction_max_age_seconds+5);
     else if(key=="SpreadFilter")runtime_spread_filter=!runtime_spread_filter;
     ObjectSetInteger(0,sparam,OBJPROP_STATE,false);
