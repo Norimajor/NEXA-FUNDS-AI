@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 from dotenv import load_dotenv
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -12,6 +13,7 @@ load_dotenv()
 ml_router = APIRouter()
 processor = MarketDataProcessor()
 prediction_threshold = float(os.getenv("MODEL_THRESHOLD", "0.62"))
+
 h1_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_H1_MODEL_PATH", "models/xauusd_h1_pivot_reversal_20261007.joblib"),
     prediction_threshold,
@@ -22,6 +24,36 @@ m15_engine = TradingEngine(ModelPredictor(
     prediction_threshold,
     os.getenv("NEXA_M15_INTERVAL_MODEL_PATH", ""),
     os.getenv("NEXA_M15_TREND_MODEL_PATH", "models/xauusd_m15_trend_20261008.joblib"),
+))
+shared_trend_path = os.getenv(
+    "NEXA_SHARED_TREND_MODEL_PATH",
+    "models/pooled_all_timeframe_trend_20261017.joblib",
+)
+h4_engine = TradingEngine(ModelPredictor(
+    "models/__trend_only__.joblib",
+    prediction_threshold,
+    trend_path=os.getenv("NEXA_H4_TREND_MODEL_PATH", shared_trend_path),
+))
+h1_multi_engine = TradingEngine(ModelPredictor(
+    "models/__trend_only__.joblib",
+    prediction_threshold,
+    trend_path=os.getenv("NEXA_H1_MULTI_TREND_MODEL_PATH", shared_trend_path),
+))
+m30_entry_engine = TradingEngine(ModelPredictor(
+    os.getenv("NEXA_M30_ENTRY_MODEL_PATH", "models/m30_entry_20261017.joblib"),
+    prediction_threshold,
+))
+m15_entry_engine = TradingEngine(ModelPredictor(
+    os.getenv("NEXA_M15_ENTRY_MODEL_PATH", "models/m15_entry_20261017.joblib"),
+    prediction_threshold,
+))
+m5_entry_engine = TradingEngine(ModelPredictor(
+    os.getenv("NEXA_M5_ENTRY_MODEL_PATH", "models/m5_entry_20261017.joblib"),
+    prediction_threshold,
+))
+m1_entry_engine = TradingEngine(ModelPredictor(
+    os.getenv("NEXA_M1_ENTRY_MODEL_PATH", "models/m1_entry_20261017.joblib"),
+    prediction_threshold,
 ))
 INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
 
@@ -77,6 +109,11 @@ class MultiTimeframeCandleBatch(BaseModel):
     symbol: str = Field(min_length=1, max_length=30)
     h1_candles: list[Candle] = Field(min_length=260)
     m15_candles: list[Candle] = Field(min_length=260)
+    h4_candles: list[Candle] | None = Field(default=None, min_length=260)
+    m30_candles: list[Candle] | None = Field(default=None, min_length=260)
+    m5_candles: list[Candle] | None = Field(default=None, min_length=260)
+    m1_candles: list[Candle] | None = Field(default=None, min_length=260)
+    operating_mode: Literal["AUTO", "SCALP", "SWING"] = "AUTO"
 
 
 def _prepare_and_analyze(candles: list[Candle], selected_engine: TradingEngine, use_structure_filters=True):
@@ -111,6 +148,210 @@ def verify_api_key(
             raise HTTPException(status_code=401, detail="Invalid API key.")
 
 
+def _trend_direction(result: dict) -> tuple[str, float]:
+    direction = result.get("trend_direction")
+    if direction not in {"BUY", "SELL", "RANGE"}:
+        direction = "RANGE"
+    return direction, float(result.get("trend_strength", 0.0) or 0.0)
+
+
+def _entry_candidate(first: dict, second: dict, trend: str) -> tuple[str, float, dict]:
+    first_signal = first.get("signal", "WAIT")
+    second_signal = second.get("signal", "WAIT")
+    if (
+        first_signal not in {"BUY", "SELL"}
+        or first_signal != second_signal
+        or first_signal != trend
+    ):
+        return "WAIT", 0.0, {}
+    confidence = min(
+        float(first.get("confidence", 0.0) or 0.0),
+        float(second.get("confidence", 0.0) or 0.0),
+    )
+    if confidence < prediction_threshold * 100:
+        return "WAIT", 0.0, {}
+    return first_signal, confidence, first
+
+
+def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
+    candle_sets = {
+        "H4": batch.h4_candles,
+        "H1": batch.h1_candles,
+        "M30": batch.m30_candles,
+        "M15": batch.m15_candles,
+        "M5": batch.m5_candles,
+        "M1": batch.m1_candles,
+    }
+    engines = {
+        "H4": h4_engine,
+        "H1": h1_multi_engine,
+        "M30": m30_entry_engine,
+        "M15": m15_entry_engine,
+        "M5": m5_entry_engine,
+        "M1": m1_entry_engine,
+    }
+    try:
+        analyses = {
+            timeframe: _prepare_and_analyze(candles, engines[timeframe], use_structure_filters=False)
+            for timeframe, candles in candle_sets.items()
+            if candles is not None
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    h4_direction, h4_confidence = _trend_direction(analyses["H4"])
+    h1_direction, h1_confidence = _trend_direction(analyses["H1"])
+    minimum_trend_confidence = float(os.getenv("NEXA_TREND_MIN_CONFIDENCE", "0.55"))
+    h1_trend_usable = (
+        h1_direction in {"BUY", "SELL"}
+        and h1_confidence >= minimum_trend_confidence
+    )
+    h4_aligned = h4_direction == h1_direction and h4_confidence >= minimum_trend_confidence
+    trend = h1_direction if h1_trend_usable else "RANGE"
+    scalp_signal, scalp_confidence, scalp_result = _entry_candidate(
+        analyses["M1"], analyses["M5"], trend
+    )
+    swing_signal, swing_confidence, swing_result = _entry_candidate(
+        analyses["M15"], analyses["M30"], trend
+    )
+
+    if batch.operating_mode == "SCALP":
+        mode, signal, confidence, entry_result = (
+            ("SCALP", scalp_signal, scalp_confidence, scalp_result)
+            if scalp_signal in {"BUY", "SELL"}
+            else ("WAIT", "WAIT", 0.0, {})
+        )
+    elif batch.operating_mode == "SWING":
+        mode, signal, confidence, entry_result = (
+            ("SWING", swing_signal, swing_confidence, swing_result)
+            if swing_signal in {"BUY", "SELL"}
+            else ("WAIT", "WAIT", 0.0, {})
+        )
+    elif swing_signal in {"BUY", "SELL"}:
+        mode, signal, confidence, entry_result = (
+            "SWING", swing_signal, swing_confidence, swing_result
+        )
+    elif scalp_signal in {"BUY", "SELL"}:
+        mode, signal, confidence, entry_result = (
+            "SCALP", scalp_signal, scalp_confidence, scalp_result
+        )
+    else:
+        mode, signal, confidence, entry_result = "WAIT", "WAIT", 0.0, {}
+
+    setup_type = entry_result.get("setup_type", "unknown")
+    model_class = entry_result.get("model_class", "unknown")
+    entry_levels = entry_result.get("levels", {}) or {}
+    bullish = entry_levels.get("potential_bullish_reversal") or {}
+    bearish = entry_levels.get("potential_bearish_reversal") or {}
+    zone = bullish if signal == "BUY" else bearish if signal == "SELL" else {}
+    zone_low = float(zone.get("low") or 0.0)
+    zone_high = float(zone.get("high") or 0.0)
+    candle_low = float(entry_result.get("candle_low") or 0.0)
+    candle_high = float(entry_result.get("candle_high") or 0.0)
+    valid_zone = zone_low > 0 and zone_high >= zone_low
+    entry_triggered = bool(
+        signal in {"BUY", "SELL"}
+        and valid_zone
+        and candle_high >= candle_low > 0
+        and candle_low <= zone_high
+        and candle_high >= zone_low
+    )
+    is_scalp = mode == "SCALP"
+    if is_scalp:
+        stop_atr, target_atr = 0.7, 1.0 if h4_aligned else 0.8
+    else:
+        stop_atr, target_atr = 1.0, 1.5 if h4_aligned else 1.2
+    if mode == "WAIT":
+        stop_atr = target_atr = 0.0
+    atr = float(entry_result.get("atr") or 0.0)
+    entry_price = float(zone.get("mid") or 0.0) if valid_zone else 0.0
+    timeframe_results = {}
+    for timeframe, analysis in analyses.items():
+        timeframe_results[timeframe.lower()] = {
+            "signal": analysis.get("signal", "WAIT"),
+            "direction": analysis.get("trend_direction", analysis.get("direction", "NONE")),
+            "confidence": float(analysis.get("trend_strength", analysis.get("confidence", 0.0)) or 0.0),
+            "setup_confidence": float(analysis.get("confidence", 0.0) or 0.0),
+            "setup_type": analysis.get("setup_type", "unknown"),
+            "model_version": analysis.get("trend_model_version", analysis.get("model_version", "unknown")),
+        }
+    return {
+        "symbol": batch.symbol.upper(),
+        "timeframe": "H4+H1+M30+M15+M5+M1",
+        "signal": signal,
+        "signal_reason": (
+            f"{mode}_{'CONFIRMED' if signal in {'BUY', 'SELL'} else 'WAIT'}"
+        ),
+        "confidence": round(confidence, 2),
+        "setup_type": setup_type,
+        "direction": signal if signal in {"BUY", "SELL"} else "NONE",
+        "trend_direction": trend,
+        "trend_strength": round(h1_confidence, 3),
+        "trend_reason": (
+            f"H1 current trend {h1_direction} {h1_confidence:.3f}; "
+            f"H4 overall {h4_direction} {h4_confidence:.3f}"
+        ),
+        "trend_model_version": analyses["H1"].get("trend_model_version", "unavailable"),
+        "model_class": model_class,
+        "model_class_probability": float(entry_result.get("model_class_probability", 0.0) or 0.0),
+        "runner_up_class": entry_result.get("runner_up_class", "unavailable"),
+        "runner_up_probability": float(entry_result.get("runner_up_probability", 0.0) or 0.0),
+        "setup_reason": (
+            f"{mode} entry confirmation from paired lower timeframes; "
+            f"setup={setup_type}; model={entry_result.get('model_version', 'unavailable')}"
+        ),
+        "setup_context": (
+            f"H1 direction is mandatory; H4 {'agrees' if h4_aligned else 'is informational'}; "
+            "paired entry models must agree with H1."
+        ),
+        "decision_explanation": (
+            f"H1 current trend {trend} is the hard direction gate; H4 overall trend "
+            f"{h4_direction} is optional; M1+M5 scalp and M15+M30 swing confluence."
+        ),
+        "confirmation_status": "DIRECTION_CONFIRMED" if h1_trend_usable else "WAIT_FOR_H1_DIRECTION",
+        "h4_aligned": h4_aligned,
+        "recommended_mode": mode,
+        "planned_direction": signal,
+        "poi_direction": signal if signal in {"BUY", "SELL"} else "NONE",
+        "poi_reason": f"{mode} structural zone from {entry_result.get('model_version', 'unavailable')}",
+        "entry_direction": signal if entry_triggered else "WAIT",
+        "entry_triggered": int(entry_triggered),
+        "entry_status": "ZONE_TOUCHED" if entry_triggered else "WAIT_FOR_ZONE" if valid_zone else "NO_ENTRY_ZONE",
+        "entry_price": entry_price,
+        "entry_zone_low": zone_low if valid_zone else 0.0,
+        "entry_zone_high": zone_high if valid_zone else 0.0,
+        "entry_candle_low": candle_low,
+        "entry_candle_high": candle_high,
+        "entry_zone_source": entry_levels.get(
+            "potential_bullish_reversal_source" if signal == "BUY" else "potential_bearish_reversal_source",
+            "unavailable",
+        ),
+        "risk_stop_atr": stop_atr,
+        "risk_target_atr": target_atr,
+        "execution_atr": atr,
+        "h4_signal": h4_direction,
+        "h4_confidence": h4_confidence,
+        "h1_signal": h1_direction,
+        "h1_confidence": h1_confidence,
+        "h1_setup_type": analyses["H1"].get("setup_type", "trend_only"),
+        "h1_model_version": analyses["H1"].get("trend_model_version", "unavailable"),
+        "m30_signal": analyses["M30"].get("signal", "WAIT"),
+        "m15_signal": analyses["M15"].get("signal", "WAIT"),
+        "m5_signal": analyses["M5"].get("signal", "WAIT"),
+        "m1_signal": analyses["M1"].get("signal", "WAIT"),
+        "m15_atr": atr,
+        "scalp_signal": scalp_signal,
+        "scalp_confidence": round(scalp_confidence, 2),
+        "swing_signal": swing_signal,
+        "swing_confidence": round(swing_confidence, 2),
+        "timeframes": timeframe_results,
+        "model_version": "|".join(
+            f"{tf}:{result.get('model_version', 'unknown')}"
+            for tf, result in timeframe_results.items()
+        ),
+    }
+
+
 @ml_router.post("/api/ml/predict/consensus")
 def ml_predict_consensus_endpoint(
     batch: MultiTimeframeCandleBatch,
@@ -122,6 +363,13 @@ def ml_predict_consensus_endpoint(
         allow_loopback=True,
         client_host=request.client.host if request.client else None,
     )
+    if all((
+        batch.h4_candles,
+        batch.m30_candles,
+        batch.m5_candles,
+        batch.m1_candles,
+    )):
+        return _analyze_multi_timeframe(batch)
     try:
         h1 = _prepare_and_analyze(batch.h1_candles, h1_engine, use_structure_filters=False)
         m15 = _prepare_and_analyze(batch.m15_candles, m15_engine, use_structure_filters=False)

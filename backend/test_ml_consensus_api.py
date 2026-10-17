@@ -285,3 +285,134 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(rejected.status_code, 401)
         self.assertEqual(authorized.status_code, 200, authorized.text)
+
+    def test_six_timeframe_route_uses_h4_h1_bias_and_m1_m5_scalp_pair(self):
+        candle = self.payload["h1_candles"]
+        payload = {
+            **self.payload,
+            "h4_candles": candle,
+            "m30_candles": candle,
+            "m5_candles": candle,
+            "m1_candles": candle,
+            "operating_mode": "SCALP",
+        }
+        trend = {
+            "trend_direction": "BUY",
+            "trend_strength": 0.82,
+            "trend_model_version": "pooled_trend",
+            "signal": "WAIT",
+        }
+        entry = deepcopy(self.m15_result)
+        entry.update(signal="BUY", direction="BUY", confidence=72.0, atr=0.25)
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[trend, trend, entry, entry, entry, entry],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["timeframe"], "H4+H1+M30+M15+M5+M1")
+        self.assertEqual(result["trend_direction"], "BUY")
+        self.assertEqual(result["recommended_mode"], "SCALP")
+        self.assertEqual(result["signal"], "BUY")
+        self.assertEqual(result["risk_stop_atr"], 0.7)
+        self.assertEqual(result["risk_target_atr"], 1.0)
+        self.assertEqual(result["execution_atr"], 0.25)
+        self.assertTrue(result["entry_triggered"])
+
+    def test_six_timeframe_route_allows_h1_direction_when_optional_h4_disagrees(self):
+        candle = self.payload["h1_candles"]
+        payload = {
+            **self.payload,
+            "h4_candles": candle,
+            "m30_candles": candle,
+            "m5_candles": candle,
+            "m1_candles": candle,
+            "operating_mode": "SCALP",
+        }
+        h4 = {"trend_direction": "BUY", "trend_strength": 0.8, "signal": "WAIT"}
+        h1 = {"trend_direction": "SELL", "trend_strength": 0.8, "signal": "WAIT"}
+        entry = deepcopy(self.m15_result)
+        entry.update(signal="SELL", direction="SELL", confidence=72.0)
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[h4, h1, entry, entry, entry, entry],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["trend_direction"], "SELL")
+        self.assertFalse(result["h4_aligned"])
+        self.assertEqual(result["recommended_mode"], "SCALP")
+        self.assertEqual(result["signal"], "SELL")
+        self.assertEqual(result["risk_target_atr"], 0.8)
+
+    def test_six_timeframe_route_blocks_entries_against_h1_even_when_h4_agrees(self):
+        candle = self.payload["h1_candles"]
+        payload = {
+            **self.payload,
+            "h4_candles": candle,
+            "m30_candles": candle,
+            "m5_candles": candle,
+            "m1_candles": candle,
+            "operating_mode": "SCALP",
+        }
+        trend = {"trend_direction": "BUY", "trend_strength": 0.8, "signal": "WAIT"}
+        countertrend_entry = deepcopy(self.m15_result)
+        countertrend_entry.update(signal="SELL", direction="SELL", confidence=72.0)
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[trend, trend, countertrend_entry, countertrend_entry,
+                             countertrend_entry, countertrend_entry],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["trend_direction"], "BUY")
+        self.assertEqual(result["recommended_mode"], "WAIT")
+        self.assertEqual(result["signal"], "WAIT")
+
+    def test_six_timeframe_route_uses_wider_swing_risk_profile(self):
+        candle = self.payload["h1_candles"]
+        payload = {
+            **self.payload,
+            "h4_candles": candle,
+            "m30_candles": candle,
+            "m5_candles": candle,
+            "m1_candles": candle,
+            "operating_mode": "SWING",
+        }
+        trend = {"trend_direction": "BUY", "trend_strength": 0.8, "signal": "WAIT"}
+        entry = deepcopy(self.m15_result)
+        entry.update(signal="BUY", direction="BUY", confidence=75.0, atr=0.5)
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[trend, trend, entry, entry, entry, entry],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["recommended_mode"], "SWING")
+        self.assertEqual(result["risk_stop_atr"], 1.0)
+        self.assertEqual(result["risk_target_atr"], 1.5)
+        self.assertEqual(result["execution_atr"], 0.5)

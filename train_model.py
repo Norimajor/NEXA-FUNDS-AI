@@ -18,7 +18,15 @@ from ml.model_trainer import ModelTrainer
 from ml.walk_forward import WalkForwardValidator
 
 
-def load_dataset_from_csvs(paths, max_rows_per_file=50000, sample_stride=1, grid_target_distance=None):
+def load_dataset_from_csvs(
+    paths,
+    max_rows_per_file=50000,
+    sample_stride=1,
+    horizon=12,
+    stop_atr=1.0,
+    target_atr=1.5,
+    grid_target_distance=None,
+):
     rows = []
     csv_paths = []
     for path in paths:
@@ -44,9 +52,9 @@ def load_dataset_from_csvs(paths, max_rows_per_file=50000, sample_stride=1, grid
             try:
                 prepared = MarketDataProcessor().prepare(df)
                 builder = DatasetBuilder(
-                    horizon=12,
-                    stop_atr=1.0,
-                    target_atr=1.5,
+                    horizon=horizon,
+                    stop_atr=stop_atr,
+                    target_atr=target_atr,
                     grid_target_distance=grid_target_distance,
                     include_context_detectors=False,
                 )
@@ -76,9 +84,13 @@ p.add_argument('paths', nargs='+', help='One or more CSV files or directories to
 p.add_argument('--version', default='model_001')
 p.add_argument('--sample-stride', type=int, default=1, help='Use every Nth labeled candle per file (default: 1).')
 p.add_argument('--max-rows-per-file', type=int, default=50000, help='Maximum labeled examples per file (default: 50000).')
+p.add_argument('--horizon', type=int, default=12, help='Future candles used to label each setup.')
+p.add_argument('--stop-atr', type=float, default=1.0, help='Stop barrier distance in ATR units.')
+p.add_argument('--target-atr', type=float, default=1.5, help='Target barrier distance in ATR units.')
 p.add_argument('--grid-take-profit-distance', type=float, help='Optional price-distance target for direction-specific grid interval labels.')
 p.add_argument('--interval-only', action='store_true', help='Train only grid spacing regressors; do not replace or promote a direction classifier.')
 p.add_argument('--trend-only', action='store_true', help='Train a separate BUY/SELL/RANGE trend classifier without changing the setup model.')
+p.add_argument('--candidate-only', action='store_true', help='Save model and metrics without registering or promoting it.')
 p.add_argument(
     '--force-promote',
     action='store_true',
@@ -94,6 +106,10 @@ if args.sample_stride < 1:
     raise SystemExit('--sample-stride must be at least 1.')
 if args.max_rows_per_file < 200:
     raise SystemExit('--max-rows-per-file must be at least 200.')
+if args.horizon < 1:
+    raise SystemExit('--horizon must be at least 1.')
+if args.stop_atr <= 0 or args.target_atr <= 0:
+    raise SystemExit('--stop-atr and --target-atr must be greater than zero.')
 if args.grid_take_profit_distance is not None and args.grid_take_profit_distance <= 0:
     raise SystemExit('--grid-take-profit-distance must be greater than zero.')
 if args.interval_only and args.trend_only:
@@ -103,6 +119,9 @@ dataset = load_dataset_from_csvs(
     csv_paths,
     max_rows_per_file=args.max_rows_per_file,
     sample_stride=args.sample_stride,
+    horizon=args.horizon,
+    stop_atr=args.stop_atr,
+    target_atr=args.target_atr,
     grid_target_distance=args.grid_take_profit_distance,
 )
 if len(dataset) < 200:
@@ -142,6 +161,13 @@ wf = WalkForwardValidator().validate(X, y)
 print('Walk-forward:', wf)
 result = ModelTrainer().train(X, y, TRAINING_FEATURE_NAMES, args.version, interval_targets)
 print('Training:', result)
+result['metrics']['training_configuration'] = {
+    'horizon': args.horizon,
+    'stop_atr': args.stop_atr,
+    'target_atr': args.target_atr,
+    'sample_stride': args.sample_stride,
+    'max_rows_per_file': args.max_rows_per_file,
+}
 promotion_rejections = model_promotion_rejection_reasons(wf, result['metrics'])
 result['metrics']['promotion_status'] = (
     'forced' if promotion_rejections and args.force_promote
@@ -151,6 +177,12 @@ result['metrics']['promotion_status'] = (
 result['metrics']['forced_promotion'] = bool(promotion_rejections and args.force_promote)
 result['metrics']['promotion_rejections'] = promotion_rejections
 Path(result['path']).with_suffix('.json').write_text(json.dumps(result['metrics'], indent=2))
+if args.candidate_only:
+    result['metrics']['validation_status'] = 'passed' if not promotion_rejections else 'rejected'
+    result['metrics']['promotion_status'] = 'candidate_only'
+    Path(result['path']).with_suffix('.json').write_text(json.dumps(result['metrics'], indent=2))
+    print(f'Candidate saved without registry changes: {result["path"]}')
+    raise SystemExit(0)
 ModelRegistry().register(args.version, result['metrics'])
 if not promotion_rejections or args.force_promote:
     if promotion_rejections:
