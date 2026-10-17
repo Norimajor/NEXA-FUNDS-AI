@@ -9,7 +9,14 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from api.ml_consensus import h1_engine, ml_router, m15_engine, processor, verify_api_key
+from api.ml_consensus import (
+    h1_engine,
+    install_ml_request_logging,
+    ml_router,
+    m15_engine,
+    processor,
+    verify_api_key,
+)
 from core.trading_engine import TradingEngine
 from market_data.deribit import DeribitOptionsClient
 from market_data.gold_options import GoldOptionsConnector
@@ -28,6 +35,7 @@ app = FastAPI(
     description="Supply/demand and intelligent trend-channel analysis service for NexaFunds.",
 )
 app.include_router(ml_router)
+install_ml_request_logging(app)
 
 origins = [
     x.strip() for x in os.getenv(

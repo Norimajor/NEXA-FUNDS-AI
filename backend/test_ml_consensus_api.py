@@ -262,15 +262,16 @@ class MlConsensusApiTests(unittest.TestCase):
 
     def test_consensus_route_enforces_configured_api_key(self):
         with patch.object(ml_consensus, "INGEST_API_KEY", "configured-test-key"):
-            unauthorized = self.client.post(
-                "/api/ml/predict/consensus",
-                json=self.payload,
-            )
-            rejected = self.client.post(
-                "/api/ml/predict/consensus",
-                json=self.payload,
-                headers={"X-API-Key": "incorrect-key"},
-            )
+            with self.assertLogs("uvicorn.error", level="INFO") as request_logs:
+                unauthorized = self.client.post(
+                    "/api/ml/predict/consensus",
+                    json=self.payload,
+                )
+                rejected = self.client.post(
+                    "/api/ml/predict/consensus",
+                    json=self.payload,
+                    headers={"X-API-Key": "incorrect-key"},
+                )
             with patch.object(
                 ml_consensus,
                 "_prepare_and_analyze",
@@ -285,6 +286,14 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(rejected.status_code, 401)
         self.assertEqual(authorized.status_code, 200, authorized.text)
+        self.assertTrue(unauthorized.headers["X-Nexa-Request-ID"])
+        self.assertTrue(rejected.headers["X-Nexa-Request-ID"])
+        logged_requests = "\n".join(request_logs.output)
+        self.assertIn("request_received", logged_requests)
+        self.assertIn("request_completed", logged_requests)
+        self.assertIn("status=401", logged_requests)
+        self.assertNotIn("configured-test-key", logged_requests)
+        self.assertNotIn("incorrect-key", logged_requests)
 
     def test_six_timeframe_route_uses_h4_h1_bias_and_m1_m5_scalp_pair(self):
         candle = self.payload["h1_candles"]

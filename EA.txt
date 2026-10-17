@@ -12,6 +12,8 @@
 #define EA_VERSION NEXA_VERSION
 #define DASHBOARD_VERSION NEXA_VERSION
 #define EA_MAGIC_NUMBER 123456
+// Optional build-time ML credential. Paste the Render INGEST_API_KEY between the quotes before compiling.
+#define NEXA_ML_API_KEY ""
 const double SCALP_MIN_ML_CONFIDENCE=60.0;
 
 #include <Object.mqh>
@@ -43,7 +45,7 @@ double runtime_max_spread_pips=3.0;
 int runtime_broker_utc_offset=0;
 const int InpAsianStartUTC=0, InpAsianEndUTC=8, InpLondonStartUTC=7, InpLondonEndUTC=16;
 const int InpNewYorkStartUTC=12, InpNewYorkEndUTC=21;
-string runtime_ml_api_key=""; // Loaded from terminal-local file; never shipped in source.
+string runtime_ml_api_key="";
 bool runtime_license_valid=false;
 long runtime_licensed_account=0;
 long runtime_licensed_trade_mode=-1;
@@ -1034,7 +1036,7 @@ string MLLinkStateText() {
 //--- one compact diagnostic line explaining the current state
 string MLLinkDetailText() {
     if(ml_link_state==ML_LINK_DISABLED)       return ml_link_error!=""?ml_link_error:"Service check switched off";
-    if(ml_link_state==ML_LINK_NOT_CONFIGURED) return "Endpoint not set";
+    if(ml_link_state==ML_LINK_NOT_CONFIGURED) return ml_link_error!=""?ml_link_error:"Endpoint not set";
     if(ml_link_state==ML_LINK_CONNECTED)      return ml_prediction_available?StringFormat("HTTP 200 | H1 %s | %s %s/%s | %s",ml_trend_direction,active_trading_mode,active_trading_mode=="SCALP"?ml_m1_signal:ml_m15_signal,active_trading_mode=="SCALP"?ml_m5_signal:ml_m30_signal,ml_confirmation_status):StringFormat("HTTP 200 | %d ms",ml_link_latency_ms);
     if(ml_link_state==ML_LINK_HTTP_ERROR)     return StringFormat("HTTP %d | %s",ml_link_http_code,ml_link_error);
     if(ml_link_state==ML_LINK_TIMEOUT)        return StringFormat("Timeout after %d ms",runtime_ml_timeout_ms);
@@ -1505,9 +1507,35 @@ bool AcceptMLPrediction(string body) {
         " EA=",execution_signal);
     return true;
 }
+string MLResponseHeaderValue(string response_headers,string header_name) {
+    string normalized_headers=response_headers;
+    StringReplace(normalized_headers,"\r","");
+    string target_name=header_name;
+    StringToLower(target_name);
+    int line_start=0;
+    while(line_start<StringLen(normalized_headers)) {
+        int line_end=StringFind(normalized_headers,"\n",line_start);
+        if(line_end<0) line_end=StringLen(normalized_headers);
+        string line=StringSubstr(normalized_headers,line_start,line_end-line_start);
+        int separator=StringFind(line,":");
+        if(separator>0) {
+            string current_name=StringSubstr(line,0,separator);
+            StringToLower(current_name);
+            if(current_name==target_name) {
+                string value=StringSubstr(line,separator+1);
+                StringTrimLeft(value);
+                StringTrimRight(value);
+                return value;
+            }
+        }
+        line_start=line_end+1;
+    }
+    return "";
+}
 bool RequestMLPrediction() {
     if(!InpUseMLService || IsTesterRun()) return false;
     string base=MLServiceBaseUrl(); if(StringLen(base)<8) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"ML API base URL not set"); return false; }
+    if(StringLen(runtime_ml_api_key)==0) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"Missing MQL5/Files/NEXA_ML_API_KEY.txt"); return false; }
     string body=BuildMLCandlePayload(); if(body=="") { SetMLLinkState(ML_LINK_NO_RESPONSE,0,"Fewer than 260 completed candles available on H4/H1/M30/M15/M5/M1"); return false; }
     char request[]; char response[]; string response_headers=""; string headers=MLHeaders();
     StringToCharArray(body,request,0,StringLen(body),CP_UTF8); ResetLastError(); uint started=GetTickCount();
@@ -1515,7 +1543,29 @@ bool RequestMLPrediction() {
     int error_code=GetLastError(); int elapsed=(int)(GetTickCount()-started);
     if(status==-1) { SetMLLinkState(error_code==4014?ML_LINK_NOT_PERMITTED:(error_code==5202?ML_LINK_TIMEOUT:ML_LINK_UNREACHABLE),0,StringFormat("Request error %d; allow %s in MT5 Expert Advisor options",error_code,ML_RENDER_BASE_URL)); return false; }
     if(status<200 || status>=300) {
-        string detail=status>0?CharArrayToString(response,0,MathMin(160,ArraySize(response))):StringFormat("request error %d",error_code);
+        string response_body=CharArrayToString(response,0,MathMin(512,ArraySize(response)),CP_UTF8);
+        StringReplace(response_body,"\r"," ");
+        StringReplace(response_body,"\n"," ");
+        StringReplace(response_body,"\t"," ");
+        StringTrimLeft(response_body);
+        StringTrimRight(response_body);
+        if(response_body=="") response_body="<empty response body>";
+        string request_id=MLResponseHeaderValue(response_headers,"x-nexa-request-id");
+        string server=MLResponseHeaderValue(response_headers,"server");
+        string cf_ray=MLResponseHeaderValue(response_headers,"cf-ray");
+        string content_type=MLResponseHeaderValue(response_headers,"content-type");
+        string detail=StringFormat("HTTP %d | %s",status,response_body);
+        if(request_id!="") detail+=" | request_id="+request_id;
+        if(server!="") detail+=" | server="+server;
+        if(cf_ray!="") detail+=" | cf-ray="+cf_ray;
+        if(content_type!="") detail+=" | type="+content_type;
+        Print("[NEXA][ML][DIAG] endpoint=",base,"/api/ml/predict/consensus",
+            " status=",status," elapsed_ms=",elapsed," terminal_error=",error_code,
+            " request_id=",request_id==""?"<not provided>":request_id,
+            " server=",server==""?"<not provided>":server,
+            " cf_ray=",cf_ray==""?"<not provided>":cf_ray,
+            " content_type=",content_type==""?"<not provided>":content_type,
+            " response_body=",response_body);
         SetMLLinkState(ML_LINK_HTTP_ERROR,status,detail); return false;
     }
     string prediction_body=CharArrayToString(response,0,ArraySize(response));
@@ -1614,18 +1664,23 @@ int OnInit() {
     atr_handle=iATR(_Symbol,PERIOD_M15,14);
     if(atr_handle==INVALID_HANDLE) Print("[NEXA][ERROR] ATR handle failed: ",GetLastError());
     if(!runtime_license_valid) { runtime_trading_enabled=false; runtime_new_trades_enabled=false; }
-    // Local provisioning avoids shipping service credentials in source or MT5 Inputs.
-    int keyfile=FileOpen("NEXA_ML_API_KEY.txt",FILE_READ|FILE_TXT|FILE_ANSI);
-    if(keyfile!=INVALID_HANDLE) { runtime_ml_api_key=FileReadString(keyfile); FileClose(keyfile); StringTrimLeft(runtime_ml_api_key); StringTrimRight(runtime_ml_api_key); }
+    runtime_ml_api_key=NEXA_ML_API_KEY;
+    StringTrimLeft(runtime_ml_api_key); StringTrimRight(runtime_ml_api_key);
+    if(runtime_ml_api_key=="") {
+        int keyfile=FileOpen("NEXA_ML_API_KEY.txt",FILE_READ|FILE_TXT|FILE_ANSI);
+        if(keyfile!=INVALID_HANDLE) { runtime_ml_api_key=FileReadString(keyfile); FileClose(keyfile); StringTrimLeft(runtime_ml_api_key); StringTrimRight(runtime_ml_api_key); }
+    }
     ResetCounters(); RecoverOpenTrades(); InitializeTesterDataFiles();
-    SetMLLinkState(IsTesterRun()?ML_LINK_DISABLED:ML_LINK_NOT_CONFIGURED,0,IsTesterRun()?"WebRequest unavailable in Strategy Tester":"Awaiting prediction request");
+    SetMLLinkState(IsTesterRun()?ML_LINK_DISABLED:ML_LINK_NOT_CONFIGURED,0,
+        IsTesterRun()?"WebRequest unavailable in Strategy Tester":
+        runtime_ml_api_key==""?"Missing MQL5/Files/NEXA_ML_API_KEY.txt":"Awaiting prediction request");
     CreateDashboard();
     if(!EventSetMillisecondTimer(50)) { Print("[NEXA][ERROR] Dashboard timer failed: ",GetLastError()); return INIT_FAILED; }
     PrintRuntimeSettings("INITIALIZED");
     Print("[NEXA][LICENSE] ",runtime_license_status," | product=",LICENSE_PRODUCT_ID," | account=",runtime_licensed_account," | server ",LICENSE_API_BASE_URL);
     Print("[NEXA] Data files: ",DataFileName("decisions"),", ",DataFileName("outcomes"),", ",DataFileName("ml"));
     Print("[NEXA] Dashboard refresh=",runtime_refresh_ms,"ms; synchronous ML timeout=",runtime_ml_timeout_ms,"ms");
-    if(runtime_ml_api_key=="") Print("[NEXA][ML] No local API credential supplied; protected endpoints may reject requests");
+    if(runtime_ml_api_key=="") Print("[NEXA][ML] No build-time or local API credential supplied; protected endpoints may reject requests");
     return INIT_SUCCEEDED;
 }
 

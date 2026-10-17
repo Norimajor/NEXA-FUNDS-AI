@@ -1,7 +1,10 @@
 import os
+import logging
+import time
+import uuid
 from typing import Literal
 from dotenv import load_dotenv
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.data_processor import MarketDataProcessor
@@ -11,6 +14,7 @@ from ml.predictor import ModelPredictor
 load_dotenv()
 
 ml_router = APIRouter()
+logger = logging.getLogger("uvicorn.error")
 processor = MarketDataProcessor()
 prediction_threshold = float(os.getenv("MODEL_THRESHOLD", "0.62"))
 
@@ -56,6 +60,44 @@ m1_entry_engine = TradingEngine(ModelPredictor(
     prediction_threshold,
 ))
 INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
+
+
+def install_ml_request_logging(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def log_ml_prediction_requests(request: Request, call_next):
+        if request.url.path != "/api/ml/predict/consensus":
+            return await call_next(request)
+
+        request_id = uuid.uuid4().hex[:12]
+        started_at = time.perf_counter()
+        logger.info(
+            "[ML_HTTP] request_received id=%s method=%s path=%s",
+            request_id,
+            request.method,
+            request.url.path,
+        )
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception(
+                "[ML_HTTP] request_failed id=%s method=%s path=%s",
+                request_id,
+                request.method,
+                request.url.path,
+            )
+            raise
+
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        response.headers["X-Nexa-Request-ID"] = request_id
+        logger.info(
+            "[ML_HTTP] request_completed id=%s method=%s path=%s status=%d duration_ms=%.1f",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed_ms,
+        )
+        return response
 
 
 def _setup_context(features: dict, direction: str) -> str:
