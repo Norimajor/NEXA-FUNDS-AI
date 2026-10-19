@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from core.data_processor import MarketDataProcessor
 from core.trading_engine import TradingEngine
+from core.trend_engine import MARKET_TREND_LOOKBACK
 from ml.predictor import ModelPredictor
 
 load_dotenv()
@@ -149,16 +150,21 @@ class Candle(BaseModel):
 
 class MultiTimeframeCandleBatch(BaseModel):
     symbol: str = Field(min_length=1, max_length=30)
-    h1_candles: list[Candle] = Field(min_length=260)
+    h1_candles: list[Candle] = Field(min_length=MARKET_TREND_LOOKBACK)
     m15_candles: list[Candle] = Field(min_length=260)
-    h4_candles: list[Candle] | None = Field(default=None, min_length=260)
+    h4_candles: list[Candle] | None = Field(default=None, min_length=MARKET_TREND_LOOKBACK)
     m30_candles: list[Candle] | None = Field(default=None, min_length=260)
     m5_candles: list[Candle] | None = Field(default=None, min_length=260)
     m1_candles: list[Candle] | None = Field(default=None, min_length=260)
     operating_mode: Literal["AUTO", "SCALP", "SWING"] = "AUTO"
 
 
-def _prepare_and_analyze(candles: list[Candle], selected_engine: TradingEngine, use_structure_filters=True):
+def _prepare_and_analyze(
+    candles: list[Candle],
+    selected_engine: TradingEngine,
+    use_structure_filters=True,
+    minimum_history=260,
+):
     prepared = processor.prepare([
         {
             "timestamp": candle.timestamp,
@@ -170,6 +176,10 @@ def _prepare_and_analyze(candles: list[Candle], selected_engine: TradingEngine, 
         }
         for candle in candles
     ])
+    if len(prepared) < minimum_history:
+        raise ValueError(
+            f"At least {minimum_history} valid completed candles are required."
+        )
     return selected_engine.analyze(prepared, use_structure_filters=use_structure_filters)
 
 
@@ -234,7 +244,14 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
     }
     try:
         analyses = {
-            timeframe: _prepare_and_analyze(candles, engines[timeframe], use_structure_filters=False)
+            timeframe: _prepare_and_analyze(
+                candles,
+                engines[timeframe],
+                use_structure_filters=False,
+                minimum_history=(
+                    MARKET_TREND_LOOKBACK if timeframe in {"H4", "H1"} else 260
+                ),
+            )
             for timeframe, candles in candle_sets.items()
             if candles is not None
         }
@@ -413,8 +430,18 @@ def ml_predict_consensus_endpoint(
     )):
         return _analyze_multi_timeframe(batch)
     try:
-        h1 = _prepare_and_analyze(batch.h1_candles, h1_engine, use_structure_filters=False)
-        m15 = _prepare_and_analyze(batch.m15_candles, m15_engine, use_structure_filters=False)
+        h1 = _prepare_and_analyze(
+            batch.h1_candles,
+            h1_engine,
+            use_structure_filters=False,
+            minimum_history=MARKET_TREND_LOOKBACK,
+        )
+        m15 = _prepare_and_analyze(
+            batch.m15_candles,
+            m15_engine,
+            use_structure_filters=False,
+            minimum_history=MARKET_TREND_LOOKBACK,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

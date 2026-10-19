@@ -126,6 +126,7 @@ class MultiClassModelPipelineTests(unittest.TestCase):
 
         expected_timestamps = pd.to_datetime(timestamps[250:297:10], utc=True)
         self.assertEqual(dataset['timestamp'].tolist(), list(expected_timestamps))
+        self.assertTrue(dataset['market_trend'].isna().all())
 
     def test_grid_interval_labels_measure_adverse_move_until_target(self):
         builder = DatasetBuilder(horizon=2, target_atr=1.5, grid_target_distance=1.5)
@@ -356,13 +357,14 @@ class MultiClassModelPipelineTests(unittest.TestCase):
     def test_market_trend_training_label_uses_trailing_price_path(self):
         from core.trend_engine import training_market_trend
 
-        downtrend = np.linspace(200.0, 150.0, 50)
-        uptrend = np.linspace(150.0, 200.0, 50)
-        ranging = 175.0 + np.sin(np.arange(50) / 3.0) * 0.2
+        downtrend = np.linspace(200.0, 150.0, 500)
+        uptrend = np.linspace(150.0, 200.0, 500)
+        ranging = 175.0 + np.sin(np.arange(500) / 3.0) * 0.2
 
         self.assertEqual(training_market_trend(downtrend, 1.0)[0], "SELL")
         self.assertEqual(training_market_trend(uptrend, 1.0)[0], "BUY")
         self.assertEqual(training_market_trend(ranging, 1.0)[0], "RANGE")
+        self.assertEqual(training_market_trend(downtrend[-499:], 1.0)[0], "RANGE")
         self.assertEqual(training_market_trend(downtrend[-20:], 1.0)[0], "RANGE")
 
     def test_predictor_returns_a_learned_trend_class_without_none(self):
@@ -377,6 +379,7 @@ class MultiClassModelPipelineTests(unittest.TestCase):
             "trend_model": TrendModel(),
             "trend_class_names": list(TrendModel.classes_),
             "feature_names": ["return_20"],
+            "trend_lookback": 500,
             "version": "trend_test",
         }
         result = predictor.predict_trend({"return_20": -0.02})
@@ -384,6 +387,20 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         self.assertEqual(result["direction"], "SELL")
         self.assertEqual(result["confidence"], 0.75)
         self.assertEqual(result["model_version"], "trend_test")
+
+    def test_trend_predictor_rejects_artifact_trained_with_old_lookback(self):
+        predictor = ModelPredictor.__new__(ModelPredictor)
+        predictor.trend_bundle = {
+            "trend_model": object(),
+            "trend_lookback": 50,
+            "version": "old_trend",
+        }
+
+        result = predictor.predict_trend({"return_20": -0.02})
+
+        self.assertEqual(result["direction"], "RANGE")
+        self.assertEqual(result["confidence"], 0.0)
+        self.assertIn("TREND_MODEL_LOOKBACK_MISMATCH", result["reason"])
 
     def test_trend_predictor_uses_range_when_model_bundle_is_unavailable(self):
         predictor = ModelPredictor.__new__(ModelPredictor)
@@ -409,8 +426,33 @@ class MultiClassModelPipelineTests(unittest.TestCase):
 
         self.assertIn("trend_model", bundle)
         self.assertEqual(set(bundle["trend_class_names"]), {"BUY", "SELL", "RANGE"})
+        self.assertEqual(bundle["trend_lookback"], 500)
+        self.assertEqual(result["metrics"]["trend_lookback"], 500)
         self.assertGreater(result["metrics"]["balanced_accuracy"], 0.5)
         self.assertEqual(result["metrics"]["chronological_test_samples"], 120)
+
+    def test_trend_model_trainer_purges_context_within_each_group(self):
+        from tempfile import TemporaryDirectory
+        from ml.model_trainer import ModelTrainer
+
+        rng = np.random.default_rng(42)
+        X = rng.normal(size=(1200, 4))
+        y = np.where(X[:, 0] > 0.7, "BUY", np.where(X[:, 0] < -0.7, "SELL", "RANGE"))
+        groups = np.repeat(["EURUSD_H1", "XAUUSD_H1"], 600)
+        with TemporaryDirectory() as model_dir:
+            result = ModelTrainer(model_dir=model_dir).train_trend(
+                X, y, ["f1", "f2", "f3", "f4"], "grouped_trend_test", groups=groups
+            )
+
+        metrics = result["metrics"]
+        self.assertEqual(metrics["purged_samples"], 10)
+        self.assertEqual(metrics["training_samples"], 950)
+        self.assertEqual(metrics["chronological_test_samples"], 240)
+        self.assertEqual(set(metrics["holdout_by_group"]), {"EURUSD_H1", "XAUUSD_H1"})
+        self.assertTrue(all(
+            item["samples"] == 120
+            for item in metrics["holdout_by_group"].values()
+        ))
 
     def test_predictor_maps_expanded_features_to_legacy_model_schema(self):
         class ShapeCheckingModel:
@@ -515,6 +557,44 @@ class MultiClassModelPipelineTests(unittest.TestCase):
 
         self.assertEqual(set(bundle["grid_interval_models"]), {"buy", "sell"})
         self.assertEqual(set(result["metrics"]["grid_interval_mae_atr"]), {"buy", "sell"})
+
+    def test_classifier_training_fits_and_validates_swing_exit_heads(self):
+        from tempfile import TemporaryDirectory
+        from ml.model_trainer import ModelTrainer
+
+        rng = np.random.default_rng(18)
+        X = rng.normal(size=(225, 3))
+        y = np.tile(np.array(["buy", "sell", "flat"]), 75)
+        interval_targets = np.column_stack((
+            np.linspace(0.2, 2.0, len(X)),
+            np.linspace(0.3, 2.5, len(X)),
+        ))
+        swing_targets = np.column_stack([
+            np.linspace(0.2 + index * 0.1, 2.0 + index * 0.1, len(X))
+            for index in range(4)
+        ])
+        with TemporaryDirectory() as model_dir:
+            result = ModelTrainer(model_dir=model_dir).train(
+                X,
+                y,
+                ["f1", "f2", "f3"],
+                "classifier_with_exits_test",
+                interval_targets,
+                swing_targets=swing_targets,
+            )
+            bundle = joblib.load(result["path"])
+
+        self.assertEqual(
+            set(bundle["swing_exit_models"]),
+            {"buy_stop", "buy_target", "sell_stop", "sell_target"},
+        )
+        self.assertEqual(
+            set(result["metrics"]["swing_exit_mae_atr"]),
+            set(bundle["swing_exit_models"]),
+        )
+        self.assertEqual(result["metrics"]["purged_samples"], 12)
+        self.assertEqual(result["metrics"]["training_samples"], 168)
+        self.assertEqual(result["metrics"]["chronological_test_samples"], 45)
 
     def test_interval_only_training_saves_sidecar_without_classifier(self):
         from tempfile import TemporaryDirectory

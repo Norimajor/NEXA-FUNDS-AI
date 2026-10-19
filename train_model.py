@@ -10,12 +10,91 @@ import numpy as np
 import pandas as pd
 
 from core.data_processor import MarketDataProcessor
-from core.feature_engine import TRAINING_FEATURE_NAMES
+from core.feature_engine import TRAINING_FEATURE_NAMES, FeatureEngine
+from core.market_structure import MarketStructureAnalyzer
+from core.trend_engine import MARKET_TREND_LOOKBACK, training_market_trend
 from ml.dataset_builder import DatasetBuilder
 from ml.model_metrics import model_promotion_rejection_reasons
 from ml.model_registry import ModelRegistry
 from ml.model_trainer import ModelTrainer
 from ml.walk_forward import WalkForwardValidator
+
+
+def load_trend_dataset_from_csvs(paths, max_rows_per_file=1000):
+    rows = []
+    feature_engine = FeatureEngine()
+    structure_analyzer = MarketStructureAnalyzer(lookback=MARKET_TREND_LOOKBACK)
+    csv_paths = []
+    for path in paths:
+        candidate = Path(path)
+        csv_paths.extend(sorted(candidate.glob('*.csv')) if candidate.is_dir() else [candidate])
+
+    seen = set()
+    for csv_path in csv_paths:
+        if not csv_path.exists() or csv_path.suffix.lower() != '.csv':
+            continue
+        resolved = csv_path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        parts = csv_path.stem.split('_m_')
+        if len(parts) != 2:
+            print(f'warning: skipped {csv_path.name}: expected SYMBOL_m_TIMEFRAME filename')
+            continue
+        symbol, timeframe = parts[0].upper(), parts[1].upper()
+        try:
+            prepared = MarketDataProcessor().prepare(pd.read_csv(csv_path))
+        except Exception as exc:
+            print(f'warning: skipped {csv_path.name}: {exc}')
+            continue
+
+        first_index = MARKET_TREND_LOOKBACK - 1
+        eligible_count = len(prepared) - first_index
+        if eligible_count <= 0:
+            print(f'warning: skipped {csv_path.name}: fewer than {MARKET_TREND_LOOKBACK} valid candles')
+            continue
+        sample_count = min(
+            max_rows_per_file,
+            max(2, eligible_count // (MARKET_TREND_LOOKBACK // 5)),
+        )
+        indices = np.unique(
+            np.linspace(first_index, len(prepared) - 1, sample_count, dtype=int)
+        )
+        file_rows = []
+        for index in indices:
+            history = prepared.iloc[index - MARKET_TREND_LOOKBACK + 1 : index + 1]
+            current = history.iloc[-1]
+            atr = float(current['atr_14'])
+            label, move_atr = training_market_trend(history['close'], atr)
+            features = feature_engine.build(
+                history,
+                None,
+                [],
+                structure_analyzer.analyze(history),
+            )
+            if not np.isfinite([features.get(name, 0.0) for name in TRAINING_FEATURE_NAMES]).all():
+                continue
+            file_rows.append({
+                'timestamp': current['timestamp'],
+                'instrument': symbol,
+                'timeframe': timeframe,
+                'trend_label': label,
+                'trend_move_atr': move_atr,
+                **{name: float(features.get(name, 0.0)) for name in TRAINING_FEATURE_NAMES},
+            })
+        rows.extend(file_rows)
+        print(
+            f'loaded {csv_path.name}: {len(file_rows)} trend rows '
+            f'from {len(prepared)} valid candles'
+        )
+
+    if not rows:
+        raise SystemExit('No usable trend-training rows were produced from the supplied CSV files.')
+    return (
+        pd.DataFrame(rows)
+        .sort_values('timestamp', kind='mergesort')
+        .reset_index(drop=True)
+    )
 
 
 def load_dataset_from_csvs(
@@ -58,7 +137,7 @@ def load_dataset_from_csvs(
                     grid_target_distance=grid_target_distance,
                     include_context_detectors=False,
                 )
-                first_index = max(250, builder.horizon * 3)
+                first_index = max(MARKET_TREND_LOOKBACK, builder.horizon * 3)
                 eligible_rows = max(0, len(prepared) - first_index - builder.horizon)
                 file_stride = max(sample_stride, math.ceil(eligible_rows / max_rows_per_file))
                 dataset = builder.build(prepared, sample_stride=file_stride)
@@ -90,6 +169,7 @@ p.add_argument('--target-atr', type=float, default=1.5, help='Target barrier dis
 p.add_argument('--grid-take-profit-distance', type=float, help='Optional price-distance target for direction-specific grid interval labels.')
 p.add_argument('--interval-only', action='store_true', help='Train only grid spacing regressors; do not replace or promote a direction classifier.')
 p.add_argument('--trend-only', action='store_true', help='Train a separate BUY/SELL/RANGE trend classifier without changing the setup model.')
+p.add_argument('--max-trend-rows-per-file', type=int, default=1000, help='Evenly sampled trend examples per input file (default: 1000).')
 p.add_argument('--candidate-only', action='store_true', help='Save model and metrics without registering or promoting it.')
 p.add_argument(
     '--force-promote',
@@ -115,6 +195,52 @@ if args.grid_take_profit_distance is not None and args.grid_take_profit_distance
 if args.interval_only and args.trend_only:
     raise SystemExit('--interval-only and --trend-only cannot be used together.')
 
+if args.trend_only:
+    trend_dataset = load_trend_dataset_from_csvs(
+        csv_paths, max_rows_per_file=args.max_trend_rows_per_file
+    )
+    if len(trend_dataset) < 200:
+        raise SystemExit(
+            f'Only {len(trend_dataset)} trend examples were produced; supply more historical data.'
+        )
+    label_counts = trend_dataset['trend_label'].value_counts().sort_index()
+    print('Trend label distribution:')
+    print(label_counts.to_string())
+    groups = (
+        trend_dataset['instrument'] + '_' + trend_dataset['timeframe']
+    ).to_numpy()
+    result = ModelTrainer().train_trend(
+        trend_dataset[TRAINING_FEATURE_NAMES].to_numpy(dtype=float),
+        trend_dataset['trend_label'].to_numpy(),
+        TRAINING_FEATURE_NAMES,
+        args.version,
+        groups=groups,
+    )
+    result['metrics']['training_configuration'] = {
+        'trend_lookback': MARKET_TREND_LOOKBACK,
+        'max_trend_rows_per_file': args.max_trend_rows_per_file,
+        'sampled_examples': len(trend_dataset),
+        'input_files': len({
+            f"{symbol}_{timeframe}"
+            for symbol, timeframe in zip(
+                trend_dataset['instrument'], trend_dataset['timeframe']
+            )
+        }),
+        'instruments': sorted(trend_dataset['instrument'].unique().tolist()),
+        'timeframes': sorted(trend_dataset['timeframe'].unique().tolist()),
+    }
+    Path(result['path']).with_suffix('.json').write_text(
+        json.dumps(result['metrics'], indent=2)
+    )
+    if args.candidate_only:
+        result['metrics']['validation_status'] = 'candidate_only'
+        Path(result['path']).with_suffix('.json').write_text(
+            json.dumps(result['metrics'], indent=2)
+        )
+    print('Chronological trend-model holdout:', json.dumps(result['metrics'], indent=2))
+    print(f'Trend model saved separately: {result["path"]}')
+    raise SystemExit(0)
+
 dataset = load_dataset_from_csvs(
     csv_paths,
     max_rows_per_file=args.max_rows_per_file,
@@ -131,20 +257,6 @@ print('Label distribution:')
 print(dataset['label_name'].value_counts().sort_index().to_string())
 
 X = dataset[TRAINING_FEATURE_NAMES].values
-if args.trend_only:
-    trend_labels = dataset['market_trend'].to_numpy()
-    finite_rows = np.isfinite(X).all(axis=1) & pd.notna(trend_labels)
-    excluded_rows = int(len(dataset) - finite_rows.sum())
-    X = X[finite_rows]
-    trend_labels = trend_labels[finite_rows]
-    if excluded_rows:
-        print(f'Excluded {excluded_rows} trend rows with non-finite features or missing labels.')
-    result = ModelTrainer().train_trend(
-        X, trend_labels, TRAINING_FEATURE_NAMES, args.version
-    )
-    print('Chronological trend-model holdout:', json.dumps(result['metrics'], indent=2))
-    print('Trend model saved separately; the setup model was not promoted or replaced.')
-    raise SystemExit(0)
 y = dataset.label_name.values
 interval_targets = dataset[['grid_interval_buy_atr', 'grid_interval_sell_atr']].values
 exit_targets = dataset[[
@@ -159,7 +271,14 @@ if args.interval_only:
     raise SystemExit(0)
 wf = WalkForwardValidator().validate(X, y)
 print('Walk-forward:', wf)
-result = ModelTrainer().train(X, y, TRAINING_FEATURE_NAMES, args.version, interval_targets)
+result = ModelTrainer().train(
+    X,
+    y,
+    TRAINING_FEATURE_NAMES,
+    args.version,
+    interval_targets,
+    swing_targets=exit_targets,
+)
 print('Training:', result)
 result['metrics']['training_configuration'] = {
     'horizon': args.horizon,

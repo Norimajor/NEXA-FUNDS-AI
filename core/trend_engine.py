@@ -3,10 +3,13 @@ from __future__ import annotations
 import numpy as np
 
 
+MARKET_TREND_LOOKBACK = 500
+
+
 def training_market_trend(
     closes,
     atr: float,
-    lookback: int = 50,
+    lookback: int = MARKET_TREND_LOOKBACK,
     threshold_atr: float = 1.0,
 ) -> tuple[str, float]:
     """Label the trailing price path without using moving-average rules."""

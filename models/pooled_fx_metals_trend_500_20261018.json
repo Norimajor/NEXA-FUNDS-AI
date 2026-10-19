@@ -1,0 +1,313 @@
+{
+  "trend_lookback": 500,
+  "purged_samples": 240,
+  "accuracy": 0.6046511627906976,
+  "balanced_accuracy": 0.48815750189885265,
+  "roc_auc": 0.7800678621719401,
+  "training_samples": 10056,
+  "chronological_test_samples": 2580,
+  "classes": [
+    "BUY",
+    "RANGE",
+    "SELL"
+  ],
+  "class_precision": {
+    "BUY": 0.7566137566137566,
+    "RANGE": 0.062370062370062374,
+    "SELL": 0.6963730569948187
+  },
+  "class_recall": {
+    "BUY": 0.648036253776435,
+    "RANGE": 0.21428571428571427,
+    "SELL": 0.6021505376344086
+  },
+  "test_class_support": {
+    "BUY": 1324,
+    "RANGE": 140,
+    "SELL": 1116
+  },
+  "test_confusion_matrix": [
+    [
+      858,
+      223,
+      243
+    ],
+    [
+      60,
+      30,
+      50
+    ],
+    [
+      216,
+      228,
+      672
+    ]
+  ],
+  "holdout_by_group": {
+    "AUDUSD_H1": {
+      "samples": 60,
+      "accuracy": 0.6333333333333333,
+      "balanced_accuracy": 0.459551656920078
+    },
+    "AUDUSD_H4": {
+      "samples": 22,
+      "accuracy": 0.6363636363636364,
+      "balanced_accuracy": 0.6666666666666666
+    },
+    "AUDUSD_M1": {
+      "samples": 60,
+      "accuracy": 0.6833333333333333,
+      "balanced_accuracy": 0.5516754850088184
+    },
+    "AUDUSD_M15": {
+      "samples": 60,
+      "accuracy": 0.65,
+      "balanced_accuracy": 0.554320987654321
+    },
+    "AUDUSD_M30": {
+      "samples": 60,
+      "accuracy": 0.48333333333333334,
+      "balanced_accuracy": 0.3608108108108108
+    },
+    "AUDUSD_M5": {
+      "samples": 60,
+      "accuracy": 0.5166666666666667,
+      "balanced_accuracy": 0.45959595959595956
+    },
+    "EURUSD_H1": {
+      "samples": 60,
+      "accuracy": 0.6,
+      "balanced_accuracy": 0.40727969348659004
+    },
+    "EURUSD_H4": {
+      "samples": 25,
+      "accuracy": 0.44,
+      "balanced_accuracy": 0.29743589743589743
+    },
+    "EURUSD_M1": {
+      "samples": 59,
+      "accuracy": 0.711864406779661,
+      "balanced_accuracy": 0.7053140096618358
+    },
+    "EURUSD_M15": {
+      "samples": 60,
+      "accuracy": 0.5666666666666667,
+      "balanced_accuracy": 0.3904761904761904
+    },
+    "EURUSD_M30": {
+      "samples": 60,
+      "accuracy": 0.6333333333333333,
+      "balanced_accuracy": 0.5213920817369093
+    },
+    "EURUSD_M5": {
+      "samples": 60,
+      "accuracy": 0.5666666666666667,
+      "balanced_accuracy": 0.3842911877394635
+    },
+    "GBPUSD_H1": {
+      "samples": 60,
+      "accuracy": 0.6,
+      "balanced_accuracy": 0.4080459770114942
+    },
+    "GBPUSD_H4": {
+      "samples": 22,
+      "accuracy": 0.5,
+      "balanced_accuracy": 0.6454545454545454
+    },
+    "GBPUSD_M1": {
+      "samples": 60,
+      "accuracy": 0.5833333333333334,
+      "balanced_accuracy": 0.415921668795232
+    },
+    "GBPUSD_M15": {
+      "samples": 60,
+      "accuracy": 0.65,
+      "balanced_accuracy": 0.5631313131313131
+    },
+    "GBPUSD_M30": {
+      "samples": 60,
+      "accuracy": 0.43333333333333335,
+      "balanced_accuracy": 0.3020833333333333
+    },
+    "GBPUSD_M5": {
+      "samples": 60,
+      "accuracy": 0.6,
+      "balanced_accuracy": 0.5690476190476191
+    },
+    "NZDUSD_H1": {
+      "samples": 60,
+      "accuracy": 0.5833333333333334,
+      "balanced_accuracy": 0.4034249303066508
+    },
+    "NZDUSD_H4": {
+      "samples": 22,
+      "accuracy": 0.5,
+      "balanced_accuracy": 0.6545454545454547
+    },
+    "NZDUSD_M1": {
+      "samples": 59,
+      "accuracy": 0.6440677966101694,
+      "balanced_accuracy": 0.4593280282935455
+    },
+    "NZDUSD_M15": {
+      "samples": 60,
+      "accuracy": 0.7,
+      "balanced_accuracy": 0.5714285714285715
+    },
+    "NZDUSD_M30": {
+      "samples": 60,
+      "accuracy": 0.6166666666666667,
+      "balanced_accuracy": 0.6183035714285714
+    },
+    "NZDUSD_M5": {
+      "samples": 60,
+      "accuracy": 0.5666666666666667,
+      "balanced_accuracy": 0.4078282828282829
+    },
+    "USDCAD_H1": {
+      "samples": 60,
+      "accuracy": 0.6,
+      "balanced_accuracy": 0.5295019157088122
+    },
+    "USDCAD_H4": {
+      "samples": 22,
+      "accuracy": 0.5909090909090909,
+      "balanced_accuracy": 0.4518518518518519
+    },
+    "USDCAD_M1": {
+      "samples": 60,
+      "accuracy": 0.6833333333333333,
+      "balanced_accuracy": 0.5473137973137973
+    },
+    "USDCAD_M15": {
+      "samples": 60,
+      "accuracy": 0.6666666666666666,
+      "balanced_accuracy": 0.5805555555555556
+    },
+    "USDCAD_M30": {
+      "samples": 60,
+      "accuracy": 0.5833333333333334,
+      "balanced_accuracy": 0.4167730949340145
+    },
+    "USDCAD_M5": {
+      "samples": 60,
+      "accuracy": 0.6833333333333333,
+      "balanced_accuracy": 0.47126436781609193
+    },
+    "USDCHF_H1": {
+      "samples": 60,
+      "accuracy": 0.5166666666666667,
+      "balanced_accuracy": 0.44093231162196683
+    },
+    "USDCHF_H4": {
+      "samples": 22,
+      "accuracy": 0.5,
+      "balanced_accuracy": 0.3461538461538461
+    },
+    "USDCHF_M1": {
+      "samples": 58,
+      "accuracy": 0.7586206896551724,
+      "balanced_accuracy": 0.7290157004830918
+    },
+    "USDCHF_M15": {
+      "samples": 60,
+      "accuracy": 0.65,
+      "balanced_accuracy": 0.56990231990232
+    },
+    "USDCHF_M30": {
+      "samples": 60,
+      "accuracy": 0.6833333333333333,
+      "balanced_accuracy": 0.6319710515112814
+    },
+    "USDCHF_M5": {
+      "samples": 60,
+      "accuracy": 0.6,
+      "balanced_accuracy": 0.4158730158730159
+    },
+    "USDJPY_H1": {
+      "samples": 60,
+      "accuracy": 0.6166666666666667,
+      "balanced_accuracy": 0.41756756756756763
+    },
+    "USDJPY_H4": {
+      "samples": 24,
+      "accuracy": 0.75,
+      "balanced_accuracy": 0.84640522875817
+    },
+    "USDJPY_M1": {
+      "samples": 60,
+      "accuracy": 0.7166666666666667,
+      "balanced_accuracy": 0.49900438072481085
+    },
+    "USDJPY_M15": {
+      "samples": 60,
+      "accuracy": 0.4666666666666667,
+      "balanced_accuracy": 0.32051282051282054
+    },
+    "USDJPY_M30": {
+      "samples": 60,
+      "accuracy": 0.5166666666666667,
+      "balanced_accuracy": 0.3372549019607843
+    },
+    "USDJPY_M5": {
+      "samples": 60,
+      "accuracy": 0.7,
+      "balanced_accuracy": 0.5934343434343434
+    },
+    "XAUUSD_H1": {
+      "samples": 60,
+      "accuracy": 0.6,
+      "balanced_accuracy": 0.48888888888888893
+    },
+    "XAUUSD_H4": {
+      "samples": 25,
+      "accuracy": 0.64,
+      "balanced_accuracy": 0.6491228070175439
+    },
+    "XAUUSD_M1": {
+      "samples": 60,
+      "accuracy": 0.48333333333333334,
+      "balanced_accuracy": 0.43827160493827155
+    },
+    "XAUUSD_M15": {
+      "samples": 60,
+      "accuracy": 0.6,
+      "balanced_accuracy": 0.4066924066924067
+    },
+    "XAUUSD_M30": {
+      "samples": 60,
+      "accuracy": 0.5333333333333333,
+      "balanced_accuracy": 0.3632019115890084
+    },
+    "XAUUSD_M5": {
+      "samples": 60,
+      "accuracy": 0.6166666666666667,
+      "balanced_accuracy": 0.5308641975308642
+    }
+  },
+  "training_configuration": {
+    "trend_lookback": 500,
+    "max_trend_rows_per_file": 300,
+    "sampled_examples": 12876,
+    "input_files": 48,
+    "instruments": [
+      "AUDUSD",
+      "EURUSD",
+      "GBPUSD",
+      "NZDUSD",
+      "USDCAD",
+      "USDCHF",
+      "USDJPY",
+      "XAUUSD"
+    ],
+    "timeframes": [
+      "H1",
+      "H4",
+      "M1",
+      "M15",
+      "M30",
+      "M5"
+    ]
+  },
+  "validation_status": "candidate_only"
+}

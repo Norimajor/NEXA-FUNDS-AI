@@ -169,7 +169,7 @@ class SignalApiTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         candles = []
         price = 100.0
-        for i in range(260):
+        for i in range(500):
             ts = now - timedelta(minutes=260 - i)
             open_ = price
             close = price + 0.25 if i % 4 == 0 else price - 0.15
@@ -215,7 +215,7 @@ class SignalApiTests(unittest.TestCase):
             "low": 99.0,
             "close": 100.0,
             "volume": 1000.0,
-        } for index in range(260)]
+        } for index in range(500)]
         h1_result = {
             "signal": "BUY", "confidence": 74.0, "setup_type": "continuation",
             "probabilities": {"buy": 74.0, "sell": 10.0}, "model_version": "gold_h1",
@@ -252,7 +252,7 @@ class SignalApiTests(unittest.TestCase):
             "low": 99.0,
             "close": 100.0,
             "volume": 1000.0,
-        } for index in range(260)]
+        } for index in range(500)]
         h1_result = {
             "signal": "BUY", "confidence": 74.0, "setup_type": "continuation",
             "probabilities": {"buy": 74.0, "sell": 10.0}, "model_version": "gold_h1",
@@ -289,7 +289,7 @@ class SignalApiTests(unittest.TestCase):
             "low": 2299.0,
             "close": 2300.5,
             "volume": 1000.0,
-        } for index in range(260)]
+        } for index in range(500)]
         h1_result = {
             "signal": "WAIT", "confidence": 68.0, "setup_type": "no_edge",
             "probabilities": {"buy": 0.0, "sell": 0.0}, "model_version": "gold_h1",
@@ -343,7 +343,7 @@ class SignalApiTests(unittest.TestCase):
             "low": 99.0,
             "close": 100.0,
             "volume": 1000.0,
-        } for index in range(260)]
+        } for index in range(500)]
         h1_result = {
             "signal": "SELL", "confidence": 70.0, "setup_type": "reversal",
             "probabilities": {"buy": 10.0, "sell": 70.0}, "model_version": "h1",
@@ -376,7 +376,7 @@ class SignalApiTests(unittest.TestCase):
             "low": 99.0,
             "close": 100.0,
             "volume": 1000.0,
-        } for index in range(260)]
+        } for index in range(500)]
         result = {
             "signal": "BUY",
             "confidence": 61.0,

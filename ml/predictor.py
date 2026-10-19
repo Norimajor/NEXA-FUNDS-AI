@@ -4,6 +4,8 @@ from pathlib import Path
 import joblib
 import numpy as np
 
+from core.trend_engine import MARKET_TREND_LOOKBACK
+
 
 class ModelPredictor:
     def __init__(self, path='models/current.joblib', threshold=.62, interval_path=None, trend_path=None):
@@ -47,6 +49,20 @@ class ModelPredictor:
                 'runner_up_class': 'unavailable',
                 'runner_up_probability': 0.0,
             }
+        model_version = self.trend_bundle.get('version', 'unknown')
+        if self.trend_bundle.get('trend_lookback') != MARKET_TREND_LOOKBACK:
+            return {
+                'direction': 'RANGE',
+                'confidence': 0.0,
+                'reason': (
+                    'TREND_MODEL_LOOKBACK_MISMATCH: '
+                    f'expected={MARKET_TREND_LOOKBACK}; '
+                    f'model={self.trend_bundle.get("trend_lookback", "unknown")}'
+                ),
+                'model_version': model_version,
+                'runner_up_class': 'unavailable',
+                'runner_up_probability': 0.0,
+            }
         model = self.trend_bundle.get('trend_model')
         feature_names = self.trend_bundle.get('feature_names')
         if model is None or not feature_names or not hasattr(model, 'predict_proba'):
@@ -83,7 +99,7 @@ class ModelPredictor:
                 f'ML_TREND_{best_class}={confidence:.3f}; '
                 f'runner_up_{runner_up_class}={runner_up_probability:.3f}'
             ),
-            'model_version': self.trend_bundle.get('version', 'unknown'),
+            'model_version': model_version,
             'runner_up_class': runner_up_class,
             'runner_up_probability': runner_up_probability,
         }

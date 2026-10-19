@@ -18,6 +18,7 @@ from api.ml_consensus import (
     verify_api_key,
 )
 from core.trading_engine import TradingEngine
+from core.trend_engine import MARKET_TREND_LOOKBACK
 from market_data.deribit import DeribitOptionsClient
 from market_data.gold_options import GoldOptionsConnector
 from market_data.options import ExecutionAdapter, OptionsRiskManager, OptionsSignalEngine
@@ -95,8 +96,16 @@ def ml_predict_endpoint(batch: CandleBatch, request: Request, x_api_key: str | N
         allow_loopback=True,
         client_host=request.client.host if request.client else None,
     )
-    if len(batch.candles) < 260:
-        raise HTTPException(status_code=400, detail="At least 260 completed candles are required for model inference.")
+    trend_predictor = _trend_predictor_for_timeframe(batch.timeframe)
+    minimum_candles = MARKET_TREND_LOOKBACK if trend_predictor is not None else 260
+    if len(batch.candles) < minimum_candles:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"At least {minimum_candles} completed candles are required "
+                "for model inference."
+            ),
+        )
 
     try:
         prepared = processor.prepare([
@@ -113,8 +122,16 @@ def ml_predict_endpoint(batch: CandleBatch, request: Request, x_api_key: str | N
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if trend_predictor is not None and len(prepared) < MARKET_TREND_LOOKBACK:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"At least {MARKET_TREND_LOOKBACK} valid completed candles are "
+                "required for trend inference."
+            ),
+        )
     result = engine.analyze(
-        prepared, trend_predictor=_trend_predictor_for_timeframe(batch.timeframe)
+        prepared, trend_predictor=trend_predictor
     )
     signal = result["signal"]
     confidence = float(result.get("confidence", 0.0) or 0.0)

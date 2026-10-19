@@ -22,7 +22,7 @@ class MlConsensusApiTests(unittest.TestCase):
                 "close": 100.0,
                 "volume": 1000.0,
             }
-            for index in range(260)
+            for index in range(500)
         ]
         self.payload = {
             "symbol": "XAUUSD",

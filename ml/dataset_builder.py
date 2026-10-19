@@ -8,7 +8,11 @@ from core.data_processor import MarketDataProcessor
 from core.feature_engine import FEATURE_NAMES, FeatureEngine
 from core.market_structure import MarketStructureAnalyzer
 from core.supply_demand_detector import SupplyDemandDetector
-from core.trend_engine import training_market_trend, training_trend_bias
+from core.trend_engine import (
+    MARKET_TREND_LOOKBACK,
+    training_market_trend,
+    training_trend_bias,
+)
 
 
 class DatasetBuilder:
@@ -159,6 +163,7 @@ class DatasetBuilder:
         rows: list[dict] = []
         min_index = max(250, self.horizon * 3)
         history_size = max(
+            MARKET_TREND_LOOKBACK,
             self.channels.lookback,
             self.zones.lookback,
             self.structure.lookback,
@@ -178,7 +183,12 @@ class DatasetBuilder:
             if future.empty:
                 continue
             context = self._future_context(hist, future, atr, entry)
-            market_trend, market_trend_move_atr = training_market_trend(hist["close"], atr)
+            if len(hist) >= MARKET_TREND_LOOKBACK:
+                market_trend, market_trend_move_atr = training_market_trend(
+                    hist["close"], atr
+                )
+            else:
+                market_trend, market_trend_move_atr = None, None
             label_index, label_name, direction = self._label_from_context(context)
             setup_type = label_name.rsplit("_", 1)[0] if direction != "NONE" else "no_edge"
             row = {

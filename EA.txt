@@ -1081,12 +1081,12 @@ string MLCandleTimestamp(datetime value) {
     MqlDateTime dt; TimeToStruct(value,dt);
     return StringFormat("%04d-%02d-%02dT%02d:%02d:%02dZ",dt.year,dt.mon,dt.day,dt.hour,dt.min,dt.sec);
 }
-string BuildMLCandleSeries(ENUM_TIMEFRAMES timeframe) {
+string BuildMLCandleSeries(ENUM_TIMEFRAMES timeframe,int candle_count=260) {
     MqlRates rates[]; ArraySetAsSeries(rates,true);
-    if(CopyRates(_Symbol,timeframe,1,260,rates)<260) return "";
+    if(CopyRates(_Symbol,timeframe,1,candle_count,rates)<candle_count) return "";
     string candles="[";
-    for(int i=259;i>=0;i--) {
-        if(i<259) candles+=",";
+    for(int i=candle_count-1;i>=0;i--) {
+        if(i<candle_count-1) candles+=",";
         candles+="{\"timestamp\":\""+MLCandleTimestamp(rates[i].time-runtime_broker_utc_offset*3600)+"\",\"open\":"+DoubleToString(rates[i].open,_Digits)
                 +",\"high\":"+DoubleToString(rates[i].high,_Digits)+",\"low\":"+DoubleToString(rates[i].low,_Digits)
                 +",\"close\":"+DoubleToString(rates[i].close,_Digits)+",\"volume\":"+DoubleToString((double)rates[i].tick_volume,0)+"}";
@@ -1094,8 +1094,8 @@ string BuildMLCandleSeries(ENUM_TIMEFRAMES timeframe) {
     return candles+"]";
 }
 string BuildMLCandlePayload() {
-    string h4=BuildMLCandleSeries(PERIOD_H4);
-    string h1=BuildMLCandleSeries(PERIOD_H1);
+    string h4=BuildMLCandleSeries(PERIOD_H4,500);
+    string h1=BuildMLCandleSeries(PERIOD_H1,500);
     string m30=BuildMLCandleSeries(PERIOD_M30);
     string m15=BuildMLCandleSeries(PERIOD_M15);
     string m5=BuildMLCandleSeries(PERIOD_M5);
