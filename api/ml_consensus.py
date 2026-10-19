@@ -18,21 +18,22 @@ ml_router = APIRouter()
 logger = logging.getLogger("uvicorn.error")
 processor = MarketDataProcessor()
 prediction_threshold = float(os.getenv("MODEL_THRESHOLD", "0.62"))
+DEFAULT_TREND_MODEL_PATH = "models/pooled_fx_metals_trend_500_20261018.joblib"
 
 h1_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_H1_MODEL_PATH", "models/xauusd_h1_pivot_reversal_20261007.joblib"),
     prediction_threshold,
-    trend_path=os.getenv("NEXA_H1_TREND_MODEL_PATH", "models/xauusd_h1_trend_20261008.joblib"),
+    trend_path=os.getenv("NEXA_H1_TREND_MODEL_PATH", DEFAULT_TREND_MODEL_PATH),
 ))
 m15_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_M15_MODEL_PATH", "models/xauusd_m15_pivot_reversal_20261007.joblib"),
     prediction_threshold,
     os.getenv("NEXA_M15_INTERVAL_MODEL_PATH", ""),
-    os.getenv("NEXA_M15_TREND_MODEL_PATH", "models/xauusd_m15_trend_20261008.joblib"),
+    os.getenv("NEXA_M15_TREND_MODEL_PATH", DEFAULT_TREND_MODEL_PATH),
 ))
 shared_trend_path = os.getenv(
     "NEXA_SHARED_TREND_MODEL_PATH",
-    "models/pooled_all_timeframe_trend_20261017.joblib",
+    DEFAULT_TREND_MODEL_PATH,
 )
 h4_engine = TradingEngine(ModelPredictor(
     "models/__trend_only__.joblib",
