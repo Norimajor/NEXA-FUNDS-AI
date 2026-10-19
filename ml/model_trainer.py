@@ -44,6 +44,8 @@ class ModelTrainer:
         feature_names,
         version='trend_candidate',
         groups=None,
+        class_weight='balanced',
+        range_weight_scale=1.0,
     ):
         X = np.asarray(X, dtype=float)
         y = np.asarray(y)
@@ -51,6 +53,10 @@ class ModelTrainer:
             raise ValueError('At least 200 finite feature rows and one market-trend label per row are required.')
         if groups is not None and len(groups) != len(X):
             raise ValueError('Trend training groups must contain one value per feature row.')
+        if class_weight not in {'balanced', None}:
+            raise ValueError("Trend class_weight must be 'balanced' or None.")
+        if not np.isfinite(range_weight_scale) or not 0 < range_weight_scale <= 1:
+            raise ValueError('Trend range_weight_scale must be greater than 0 and at most 1.')
         expected_classes = {'BUY', 'SELL', 'RANGE'}
         if set(y) != expected_classes:
             raise ValueError('Trend training labels must include BUY, SELL, and RANGE.')
@@ -84,6 +90,21 @@ class ModelTrainer:
         train_y, test_y = y[train_indices], y[test_indices]
         if set(train_y) != expected_classes or set(test_y) != expected_classes:
             raise ValueError('The chronological trend-model train and test splits must each include BUY, SELL, and RANGE.')
+        trend_weights = class_weight
+        trend_sample_weights = None
+        if class_weight == 'balanced' and range_weight_scale < 1:
+            class_counts = {
+                label: int(np.sum(train_y == label)) for label in expected_classes
+            }
+            trend_weights = {
+                label: len(train_y) / (len(expected_classes) * class_counts[label])
+                * (range_weight_scale if label == 'RANGE' else 1.0)
+                for label in expected_classes
+            }
+            trend_sample_weights = np.asarray(
+                [trend_weights[label] for label in train_y], dtype=float
+            )
+            trend_weights = None
 
         model = HistGradientBoostingClassifier(
             learning_rate=.04,
@@ -91,10 +112,12 @@ class ModelTrainer:
             max_leaf_nodes=15,
             min_samples_leaf=15,
             l2_regularization=1.0,
-            class_weight='balanced',
+            class_weight=trend_weights,
             random_state=42,
         )
-        model.fit(X[train_indices], train_y)
+        model.fit(
+            X[train_indices], train_y, sample_weight=trend_sample_weights
+        )
         test_prediction = model.predict(X[test_indices])
         test_probabilities = model.predict_proba(X[test_indices])
         classes = [str(label) for label in model.classes_]
@@ -106,6 +129,10 @@ class ModelTrainer:
         )
         metrics = {
             'trend_lookback': MARKET_TREND_LOOKBACK,
+            'trend_class_weight': (
+                'balanced' if class_weight == 'balanced' else 'none'
+            ),
+            'trend_range_weight_scale': range_weight_scale,
             'purged_samples': purged_samples,
             'accuracy': float(accuracy_score(test_y, test_prediction)),
             'balanced_accuracy': float(balanced_accuracy_score(test_y, test_prediction)),
@@ -155,15 +182,34 @@ class ModelTrainer:
             max_leaf_nodes=15,
             min_samples_leaf=15,
             l2_regularization=1.0,
-            class_weight='balanced',
+            class_weight=trend_weights,
             random_state=42,
         )
-        final_model.fit(X, y)
+        final_sample_weights = None
+        final_class_weights = None
+        if trend_weights is None and trend_sample_weights is not None:
+            all_class_counts = {
+                label: int(np.sum(y == label)) for label in expected_classes
+            }
+            final_class_weights = {
+                label: len(y) / (len(expected_classes) * all_class_counts[label])
+                * (range_weight_scale if label == 'RANGE' else 1.0)
+                for label in expected_classes
+            }
+            final_sample_weights = np.asarray(
+                [final_class_weights[label] for label in y], dtype=float
+            )
+        final_model.fit(X, y, sample_weight=final_sample_weights)
         bundle = {
             'trend_model': final_model,
             'trend_class_names': [str(label) for label in final_model.classes_],
             'feature_names': list(feature_names),
             'trend_lookback': MARKET_TREND_LOOKBACK,
+            'trend_class_weight': (
+                'balanced' if class_weight == 'balanced' else 'none'
+            ),
+            'trend_range_weight_scale': range_weight_scale,
+            'trend_class_weights': final_class_weights,
             'training_groups': sorted(
                 {str(group) for group in groups}
             ) if groups is not None else [],

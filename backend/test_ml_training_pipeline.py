@@ -430,6 +430,49 @@ class MultiClassModelPipelineTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["trend_lookback"], 500)
         self.assertGreater(result["metrics"]["balanced_accuracy"], 0.5)
         self.assertEqual(result["metrics"]["chronological_test_samples"], 120)
+        self.assertEqual(result["metrics"]["trend_class_weight"], "balanced")
+        self.assertEqual(bundle["trend_model"].get_params()["class_weight"], "balanced")
+
+    def test_trend_model_trainer_supports_natural_class_frequencies(self):
+        from tempfile import TemporaryDirectory
+        from ml.model_trainer import ModelTrainer
+
+        rng = np.random.default_rng(7)
+        X = rng.normal(size=(600, 4))
+        y = np.where(X[:, 0] > 0.7, "BUY", np.where(X[:, 0] < -0.7, "SELL", "RANGE"))
+        with TemporaryDirectory() as model_dir:
+            result = ModelTrainer(model_dir=model_dir).train_trend(
+                X, y, ["f1", "f2", "f3", "f4"], "trend_unweighted_test",
+                class_weight=None,
+            )
+            bundle = joblib.load(result["path"])
+
+        self.assertEqual(result["metrics"]["trend_class_weight"], "none")
+        self.assertIsNone(bundle["trend_model"].get_params()["class_weight"])
+
+    def test_trend_model_trainer_scales_range_weight_without_removing_range_class(self):
+        from tempfile import TemporaryDirectory
+        from ml.model_trainer import ModelTrainer
+
+        rng = np.random.default_rng(11)
+        X = rng.normal(size=(600, 4))
+        y = np.where(X[:, 0] > 0.7, "BUY", np.where(X[:, 0] < -0.7, "SELL", "RANGE"))
+        with TemporaryDirectory() as model_dir:
+            result = ModelTrainer(model_dir=model_dir).train_trend(
+                X, y, ["f1", "f2", "f3", "f4"], "trend_scaled_range_test",
+                range_weight_scale=0.25,
+            )
+            bundle = joblib.load(result["path"])
+
+        weights = bundle["trend_model"].get_params()["class_weight"]
+        self.assertIn("RANGE", bundle["trend_class_names"])
+        self.assertIsNone(weights)
+        self.assertAlmostEqual(
+            bundle["trend_class_weights"]["RANGE"]
+            / (len(y) / (3 * np.sum(y == "RANGE"))),
+            0.25,
+        )
+        self.assertEqual(result["metrics"]["trend_range_weight_scale"], 0.25)
 
     def test_trend_model_trainer_purges_context_within_each_group(self):
         from tempfile import TemporaryDirectory

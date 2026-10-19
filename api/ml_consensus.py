@@ -18,7 +18,7 @@ ml_router = APIRouter()
 logger = logging.getLogger("uvicorn.error")
 processor = MarketDataProcessor()
 prediction_threshold = float(os.getenv("MODEL_THRESHOLD", "0.62"))
-DEFAULT_TREND_MODEL_PATH = "models/pooled_fx_metals_trend_500_20261018.joblib"
+DEFAULT_TREND_MODEL_PATH = "models/xauusd_trend_500_directional_20261019.joblib"
 
 h1_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_H1_MODEL_PATH", "models/xauusd_h1_pivot_reversal_20261007.joblib"),

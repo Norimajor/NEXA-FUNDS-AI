@@ -39,7 +39,12 @@ def load_trend_dataset_from_csvs(paths, max_rows_per_file=1000):
         seen.add(resolved)
         parts = csv_path.stem.split('_m_')
         if len(parts) != 2:
-            print(f'warning: skipped {csv_path.name}: expected SYMBOL_m_TIMEFRAME filename')
+            parts = csv_path.stem.rsplit('_', 1)
+        if len(parts) != 2:
+            print(
+                f'warning: skipped {csv_path.name}: expected SYMBOL_m_TIMEFRAME '
+                'or SYMBOL_TIMEFRAME filename'
+            )
             continue
         symbol, timeframe = parts[0].upper(), parts[1].upper()
         try:
@@ -170,6 +175,8 @@ p.add_argument('--grid-take-profit-distance', type=float, help='Optional price-d
 p.add_argument('--interval-only', action='store_true', help='Train only grid spacing regressors; do not replace or promote a direction classifier.')
 p.add_argument('--trend-only', action='store_true', help='Train a separate BUY/SELL/RANGE trend classifier without changing the setup model.')
 p.add_argument('--max-trend-rows-per-file', type=int, default=1000, help='Evenly sampled trend examples per input file (default: 1000).')
+p.add_argument('--trend-class-weight', choices=('balanced', 'none'), default='balanced', help='Trend class weighting; use none to preserve natural label frequencies.')
+p.add_argument('--trend-range-weight-scale', type=float, default=1.0, help='Scale the balanced RANGE class weight from 0 (exclusive) to 1; lower values emphasize BUY/SELL classification.')
 p.add_argument('--candidate-only', action='store_true', help='Save model and metrics without registering or promoting it.')
 p.add_argument(
     '--force-promote',
@@ -194,6 +201,8 @@ if args.grid_take_profit_distance is not None and args.grid_take_profit_distance
     raise SystemExit('--grid-take-profit-distance must be greater than zero.')
 if args.interval_only and args.trend_only:
     raise SystemExit('--interval-only and --trend-only cannot be used together.')
+if not 0 < args.trend_range_weight_scale <= 1:
+    raise SystemExit('--trend-range-weight-scale must be greater than 0 and at most 1.')
 
 if args.trend_only:
     trend_dataset = load_trend_dataset_from_csvs(
@@ -215,9 +224,13 @@ if args.trend_only:
         TRAINING_FEATURE_NAMES,
         args.version,
         groups=groups,
+        class_weight=None if args.trend_class_weight == 'none' else args.trend_class_weight,
+        range_weight_scale=args.trend_range_weight_scale,
     )
     result['metrics']['training_configuration'] = {
         'trend_lookback': MARKET_TREND_LOOKBACK,
+        'trend_class_weight': args.trend_class_weight,
+        'trend_range_weight_scale': args.trend_range_weight_scale,
         'max_trend_rows_per_file': args.max_trend_rows_per_file,
         'sampled_examples': len(trend_dataset),
         'input_files': len({

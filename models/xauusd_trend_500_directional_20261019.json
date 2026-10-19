@@ -1,0 +1,102 @@
+{
+  "trend_lookback": 500,
+  "trend_class_weight": "balanced",
+  "trend_range_weight_scale": 0.25,
+  "purged_samples": 30,
+  "accuracy": 0.6872146118721462,
+  "balanced_accuracy": 0.4751421917946685,
+  "roc_auc": 0.7560266762294009,
+  "training_samples": 3470,
+  "chronological_test_samples": 876,
+  "classes": [
+    "BUY",
+    "RANGE",
+    "SELL"
+  ],
+  "class_precision": {
+    "BUY": 0.7216699801192843,
+    "RANGE": 0.0,
+    "SELL": 0.6424731182795699
+  },
+  "class_recall": {
+    "BUY": 0.7578288100208769,
+    "RANGE": 0.0,
+    "SELL": 0.6675977653631285
+  },
+  "test_class_support": {
+    "BUY": 479,
+    "RANGE": 39,
+    "SELL": 358
+  },
+  "test_confusion_matrix": [
+    [
+      363,
+      1,
+      115
+    ],
+    [
+      21,
+      0,
+      18
+    ],
+    [
+      119,
+      0,
+      239
+    ]
+  ],
+  "holdout_by_group": {
+    "XAUUSD_H1": {
+      "samples": 86,
+      "accuracy": 0.7209302325581395,
+      "balanced_accuracy": 0.4863731656184487
+    },
+    "XAUUSD_H4": {
+      "samples": 25,
+      "accuracy": 0.84,
+      "balanced_accuracy": 0.52046783625731
+    },
+    "XAUUSD_M1": {
+      "samples": 200,
+      "accuracy": 0.635,
+      "balanced_accuracy": 0.4484563055991628
+    },
+    "XAUUSD_M15": {
+      "samples": 200,
+      "accuracy": 0.71,
+      "balanced_accuracy": 0.47932263814616755
+    },
+    "XAUUSD_M30": {
+      "samples": 165,
+      "accuracy": 0.696969696969697,
+      "balanced_accuracy": 0.48453668178118825
+    },
+    "XAUUSD_M5": {
+      "samples": 200,
+      "accuracy": 0.675,
+      "balanced_accuracy": 0.47114845938375344
+    }
+  },
+  "training_configuration": {
+    "trend_lookback": 500,
+    "trend_class_weight": "balanced",
+    "trend_range_weight_scale": 0.25,
+    "max_trend_rows_per_file": 1000,
+    "sampled_examples": 4376,
+    "input_files": 6,
+    "instruments": [
+      "XAUUSD"
+    ],
+    "timeframes": [
+      "H1",
+      "H4",
+      "M1",
+      "M15",
+      "M30",
+      "M5"
+    ]
+  },
+  "validation_status": "candidate_only",
+  "activation_status": "active_by_operator_override",
+  "validation_gate_passed": false
+}

@@ -10,6 +10,12 @@ from backend.api import app
 
 
 class MlConsensusApiTests(unittest.TestCase):
+    def test_trend_default_points_to_explicitly_selected_directional_candidate(self):
+        self.assertEqual(
+            ml_consensus.DEFAULT_TREND_MODEL_PATH,
+            "models/xauusd_trend_500_directional_20261019.joblib",
+        )
+
     def setUp(self):
         self.client = TestClient(app)
         now = datetime.now(timezone.utc)
