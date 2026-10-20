@@ -523,6 +523,46 @@ class MultiClassModelPipelineTests(unittest.TestCase):
 
         self.assertEqual(result["direction"], "BUY")
 
+    def test_predictor_marks_execution_zone_as_validated_ml_poi(self):
+        from ml.execution_levels import EXECUTION_LEVEL_SCHEMA
+
+        class ExecutionActionModel:
+            classes_ = np.array(["NO_TRADE", "BUY", "SELL"])
+
+            def predict_proba(self, X):
+                return np.array([[0.1, 0.8, 0.1]], dtype=float)
+
+        predictor = ModelPredictor.__new__(ModelPredictor)
+        predictor.execution_bundles = {
+            "SCALP": {
+                "schema_version": EXECUTION_LEVEL_SCHEMA,
+                "mode": "SCALP",
+                "validation_status": "passed",
+                "feature_names": ["feature"],
+                "classifier": ExecutionActionModel(),
+                "classes": ["NO_TRADE", "BUY", "SELL"],
+                "minimum_confidence": 0.65,
+                "version": "validated_scalp_test",
+                "side_models": {
+                    "BUY": {
+                        "entry_offset_atr": ConstantIntervalModel(-0.25),
+                        "zone_width_atr": ConstantIntervalModel(0.2),
+                        "stop_atr": ConstantIntervalModel(0.35),
+                        "target_atr": ConstantIntervalModel(0.75),
+                    },
+                },
+            },
+        }
+
+        result = predictor.predict_execution_plan(
+            {"feature": 1.0}, "SCALP", reference_price=100.0, atr=1.0
+        )
+
+        self.assertTrue(result["tradable"])
+        self.assertEqual(result["entry_zone_source"], "validated_ml_scalp_execution")
+        self.assertAlmostEqual(result["entry_zone_low"], 99.65)
+        self.assertAlmostEqual(result["entry_zone_high"], 99.85)
+
     def test_predictor_returns_direction_specific_interval_estimates(self):
         predictor = ModelPredictor.__new__(ModelPredictor)
         predictor.threshold = 0.5

@@ -13,6 +13,7 @@ from core.trend_engine import (
     training_market_trend,
     training_trend_bias,
 )
+from ml.execution_levels import label_execution_plan
 
 
 class DatasetBuilder:
@@ -25,10 +26,16 @@ class DatasetBuilder:
         target_atr=1.5,
         grid_target_distance=None,
         include_context_detectors=True,
+        include_execution_targets=False,
+        execution_cost_atr=0.05,
     ):
         self.horizon, self.stop_atr, self.target_atr = horizon, stop_atr, target_atr
         self.grid_target_distance = grid_target_distance
         self.include_context_detectors = include_context_detectors
+        self.include_execution_targets = include_execution_targets
+        self.execution_cost_atr = execution_cost_atr
+        if not np.isfinite(execution_cost_atr) or execution_cost_atr < 0:
+            raise ValueError("execution_cost_atr must be finite and non-negative.")
         self.channels, self.zones = ChannelDetector(), SupplyDemandDetector()
         self.structure, self.features = MarketStructureAnalyzer(), FeatureEngine()
         self.processor = MarketDataProcessor()
@@ -225,6 +232,17 @@ class DatasetBuilder:
                     "swing_target_sell_atr": context["swing_target_sell_atr"],
                 }
             )
+            if self.include_execution_targets:
+                future_atr = future[["open", "high", "low", "close"]].to_numpy(dtype=float)
+                future_atr = (future_atr - entry) / max(atr, 1e-8)
+                row["_future_ohlc_atr"] = future_atr
+                for mode in ("SCALP", "SWING"):
+                    plan = label_execution_plan(
+                        future_atr, mode, self.execution_cost_atr
+                    )
+                    prefix = mode.lower()
+                    for key, value in plan.items():
+                        row[f"{prefix}_{key}"] = value
             rows.append(row)
 
         if not rows:

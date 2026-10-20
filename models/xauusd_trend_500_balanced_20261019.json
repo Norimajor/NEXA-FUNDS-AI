@@ -1,0 +1,97 @@
+{
+  "trend_lookback": 500,
+  "purged_samples": 30,
+  "accuracy": 0.6666666666666666,
+  "balanced_accuracy": 0.4697615966670445,
+  "roc_auc": 0.7488415044645342,
+  "training_samples": 3470,
+  "chronological_test_samples": 876,
+  "classes": [
+    "BUY",
+    "RANGE",
+    "SELL"
+  ],
+  "class_precision": {
+    "BUY": 0.7199170124481328,
+    "RANGE": 0.06666666666666667,
+    "SELL": 0.6226912928759895
+  },
+  "class_recall": {
+    "BUY": 0.7244258872651357,
+    "RANGE": 0.02564102564102564,
+    "SELL": 0.659217877094972
+  },
+  "test_class_support": {
+    "BUY": 479,
+    "RANGE": 39,
+    "SELL": 358
+  },
+  "test_confusion_matrix": [
+    [
+      347,
+      5,
+      127
+    ],
+    [
+      22,
+      1,
+      16
+    ],
+    [
+      113,
+      9,
+      236
+    ]
+  ],
+  "holdout_by_group": {
+    "XAUUSD_H1": {
+      "samples": 86,
+      "accuracy": 0.6976744186046512,
+      "balanced_accuracy": 0.4786163522012578
+    },
+    "XAUUSD_H4": {
+      "samples": 25,
+      "accuracy": 0.8,
+      "balanced_accuracy": 0.5029239766081871
+    },
+    "XAUUSD_M1": {
+      "samples": 200,
+      "accuracy": 0.61,
+      "balanced_accuracy": 0.457827886399315
+    },
+    "XAUUSD_M15": {
+      "samples": 200,
+      "accuracy": 0.705,
+      "balanced_accuracy": 0.4771836007130125
+    },
+    "XAUUSD_M30": {
+      "samples": 165,
+      "accuracy": 0.6787878787878788,
+      "balanced_accuracy": 0.47198000232531107
+    },
+    "XAUUSD_M5": {
+      "samples": 200,
+      "accuracy": 0.645,
+      "balanced_accuracy": 0.45060690943043885
+    }
+  },
+  "training_configuration": {
+    "trend_lookback": 500,
+    "trend_class_weight": "balanced",
+    "max_trend_rows_per_file": 1000,
+    "sampled_examples": 4376,
+    "input_files": 6,
+    "instruments": [
+      "XAUUSD"
+    ],
+    "timeframes": [
+      "H1",
+      "H4",
+      "M1",
+      "M15",
+      "M30",
+      "M5"
+    ]
+  },
+  "validation_status": "candidate_only"
+}

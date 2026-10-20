@@ -20,16 +20,27 @@ processor = MarketDataProcessor()
 prediction_threshold = float(os.getenv("MODEL_THRESHOLD", "0.62"))
 DEFAULT_TREND_MODEL_PATH = "models/xauusd_trend_500_directional_20261019.joblib"
 
+
+def _execution_model_paths(timeframe: str) -> dict[str, str]:
+    prefix = f"NEXA_{timeframe}_"
+    return {
+        mode: os.getenv(f"{prefix}{mode}_EXECUTION_MODEL_PATH", "")
+        for mode in ("SCALP", "SWING")
+    }
+
+
 h1_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_H1_MODEL_PATH", "models/xauusd_h1_pivot_reversal_20261007.joblib"),
     prediction_threshold,
     trend_path=os.getenv("NEXA_H1_TREND_MODEL_PATH", DEFAULT_TREND_MODEL_PATH),
+    execution_paths=_execution_model_paths("H1"),
 ))
 m15_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_M15_MODEL_PATH", "models/xauusd_m15_pivot_reversal_20261007.joblib"),
     prediction_threshold,
     os.getenv("NEXA_M15_INTERVAL_MODEL_PATH", ""),
     os.getenv("NEXA_M15_TREND_MODEL_PATH", DEFAULT_TREND_MODEL_PATH),
+    execution_paths=_execution_model_paths("M15"),
 ))
 shared_trend_path = os.getenv(
     "NEXA_SHARED_TREND_MODEL_PATH",
@@ -39,27 +50,33 @@ h4_engine = TradingEngine(ModelPredictor(
     "models/__trend_only__.joblib",
     prediction_threshold,
     trend_path=os.getenv("NEXA_H4_TREND_MODEL_PATH", shared_trend_path),
+    execution_paths=_execution_model_paths("H4"),
 ))
 h1_multi_engine = TradingEngine(ModelPredictor(
     "models/__trend_only__.joblib",
     prediction_threshold,
     trend_path=os.getenv("NEXA_H1_MULTI_TREND_MODEL_PATH", shared_trend_path),
+    execution_paths=_execution_model_paths("H1"),
 ))
 m30_entry_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_M30_ENTRY_MODEL_PATH", "models/m30_entry_20261017.joblib"),
     prediction_threshold,
+    execution_paths=_execution_model_paths("M30"),
 ))
 m15_entry_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_M15_ENTRY_MODEL_PATH", "models/m15_entry_20261017.joblib"),
     prediction_threshold,
+    execution_paths=_execution_model_paths("M15"),
 ))
 m5_entry_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_M5_ENTRY_MODEL_PATH", "models/m5_entry_20261017.joblib"),
     prediction_threshold,
+    execution_paths=_execution_model_paths("M5"),
 ))
 m1_entry_engine = TradingEngine(ModelPredictor(
     os.getenv("NEXA_M1_ENTRY_MODEL_PATH", "models/m1_entry_20261017.joblib"),
     prediction_threshold,
+    execution_paths=_execution_model_paths("M1"),
 ))
 INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
 
@@ -208,6 +225,46 @@ def _trend_direction(result: dict) -> tuple[str, float]:
     return direction, float(result.get("trend_strength", 0.0) or 0.0)
 
 
+def _default_risk_profile(mode: str, h4_aligned: bool) -> tuple[float, float]:
+    if mode == "SWING":
+        return 1.0, 1.5
+    return (0.7, 1.0) if h4_aligned else (0.7, 0.8)
+
+
+def _matching_zone(zones, direction: str) -> dict:
+    if not isinstance(zones, list):
+        return {}
+    desired_type = "demand" if direction == "BUY" else "supply"
+    matches = [
+        zone for zone in zones
+        if isinstance(zone, dict)
+        and not zone.get("invalidated", False)
+        and str(zone.get("type") or zone.get("zone_type") or zone.get("kind") or "").lower() == desired_type
+    ]
+    if not matches:
+        return {}
+    return min(matches, key=lambda zone: float(zone.get("distance") or 1e9))
+
+
+def _zone_summary(zones: list[dict] | None) -> dict:
+    summary: dict[str, float] = {}
+    if not zones:
+        return summary
+    for side in ("BUY", "SELL"):
+        zone = _matching_zone(zones, side)
+        if not zone:
+            continue
+        low = float(zone.get("low") or 0.0)
+        high = float(zone.get("high") or 0.0)
+        mid = float(zone.get("mid") or ((low + high) / 2.0 if low and high else 0.0))
+        key = "demand" if side == "BUY" else "supply"
+        summary[f"{key}_low"] = low
+        summary[f"{key}_high"] = high
+        summary[f"{key}_mid"] = mid
+        summary[f"{key}_distance"] = float(zone.get("distance") or 0.0)
+    return summary
+
+
 def _entry_candidate(first: dict, second: dict, trend: str) -> tuple[str, float, dict]:
     first_signal = first.get("signal", "WAIT")
     second_signal = second.get("signal", "WAIT")
@@ -224,6 +281,25 @@ def _entry_candidate(first: dict, second: dict, trend: str) -> tuple[str, float,
     if confidence < prediction_threshold * 100:
         return "WAIT", 0.0, {}
     return first_signal, confidence, first
+
+
+def _range_scalp_candidate(first: dict, second: dict) -> tuple[str, float, dict]:
+    first_signal = first.get("signal", "WAIT")
+    if first_signal not in {"BUY", "SELL"} or second.get("signal") != first_signal:
+        return "WAIT", 0.0, {}
+
+    confidence = min(
+        float(first.get("confidence", 0.0) or 0.0),
+        float(second.get("confidence", 0.0) or 0.0),
+    )
+    if confidence < prediction_threshold * 100:
+        return "WAIT", 0.0, {}
+
+    result = dict(first)
+    result["setup_type"] = "range_scalp"
+    result["confidence"] = confidence
+    result["signal_reason"] = "RANGE_SCALP_MODEL_CONFLUENCE"
+    return first_signal, confidence, result
 
 
 def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
@@ -266,14 +342,29 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
         h1_direction in {"BUY", "SELL"}
         and h1_confidence >= minimum_trend_confidence
     )
+    h1_range_usable = (
+        h1_direction == "RANGE"
+        and h1_confidence >= minimum_trend_confidence
+    )
     h4_aligned = h4_direction == h1_direction and h4_confidence >= minimum_trend_confidence
     trend = h1_direction if h1_trend_usable else "RANGE"
     scalp_signal, scalp_confidence, scalp_result = _entry_candidate(
         analyses["M1"], analyses["M5"], trend
     )
+    if h1_range_usable:
+        scalp_signal, scalp_confidence, scalp_result = _range_scalp_candidate(
+            analyses["M1"], analyses["M5"]
+        )
+        if scalp_signal in {"BUY", "SELL"}:
+            mode, signal, confidence, entry_result = "SCALP", scalp_signal, scalp_confidence, scalp_result
     swing_signal, swing_confidence, swing_result = _entry_candidate(
         analyses["M15"], analyses["M30"], trend
     )
+    if h1_trend_usable and trend in {"BUY", "SELL"}:
+        if scalp_signal in {"BUY", "SELL"} and scalp_signal != trend:
+            scalp_signal, scalp_confidence, scalp_result = "WAIT", 0.0, {}
+        if swing_signal in {"BUY", "SELL"} and swing_signal != trend:
+            swing_signal, swing_confidence, swing_result = "WAIT", 0.0, {}
 
     if batch.operating_mode == "SCALP":
         mode, signal, confidence, entry_result = (
@@ -298,14 +389,44 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
     else:
         mode, signal, confidence, entry_result = "WAIT", "WAIT", 0.0, {}
 
+    execution_modes = {
+        "H4": "SWING",
+        "H1": "SWING",
+        "M30": "SWING",
+        "M15": "SWING",
+        "M5": "SCALP",
+        "M1": "SCALP",
+    }
+    execution_plans = {
+        timeframe: engines[timeframe].predictor.predict_execution_plan(
+            analysis.get("features", {}),
+            execution_modes[timeframe],
+            float(analysis.get("price") or 0.0),
+            float(analysis.get("atr") or 0.0),
+        )
+        for timeframe, analysis in analyses.items()
+    }
+    selected_plan = {}
+    if signal in {"BUY", "SELL"} and mode in {"SCALP", "SWING"}:
+        primary_timeframe = "M1" if mode == "SCALP" else "M15"
+        selected_plan = execution_plans.get(primary_timeframe, {})
+        if h1_trend_usable and signal != trend:
+            mode, signal, confidence, entry_result = "WAIT", "WAIT", 0.0, {}
+            selected_plan = {}
+        elif selected_plan and (
+            not selected_plan.get("tradable")
+            or selected_plan.get("direction") != signal
+        ):
+            selected_plan = {}
+
+    if signal in {"BUY", "SELL"} and mode in {"SCALP", "SWING"} and not selected_plan:
+        mode, signal, confidence = "WAIT", "WAIT", 0.0
+        entry_result = {}
+
     setup_type = entry_result.get("setup_type", "unknown")
     model_class = entry_result.get("model_class", "unknown")
-    entry_levels = entry_result.get("levels", {}) or {}
-    bullish = entry_levels.get("potential_bullish_reversal") or {}
-    bearish = entry_levels.get("potential_bearish_reversal") or {}
-    zone = bullish if signal == "BUY" else bearish if signal == "SELL" else {}
-    zone_low = float(zone.get("low") or 0.0)
-    zone_high = float(zone.get("high") or 0.0)
+    zone_low = float(selected_plan.get("entry_zone_low") or 0.0)
+    zone_high = float(selected_plan.get("entry_zone_high") or 0.0)
     candle_low = float(entry_result.get("candle_low") or 0.0)
     candle_high = float(entry_result.get("candle_high") or 0.0)
     valid_zone = zone_low > 0 and zone_high >= zone_low
@@ -316,17 +437,14 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
         and candle_low <= zone_high
         and candle_high >= zone_low
     )
-    is_scalp = mode == "SCALP"
-    if is_scalp:
-        stop_atr, target_atr = 0.7, 1.0 if h4_aligned else 0.8
-    else:
-        stop_atr, target_atr = 1.0, 1.5 if h4_aligned else 1.2
-    if mode == "WAIT":
-        stop_atr = target_atr = 0.0
+    stop_atr = float(selected_plan.get("stop_atr") or 0.0)
+    target_atr = float(selected_plan.get("target_atr") or 0.0)
     atr = float(entry_result.get("atr") or 0.0)
-    entry_price = float(zone.get("mid") or 0.0) if valid_zone else 0.0
+    entry_price = float(selected_plan.get("entry_price") or 0.0) if valid_zone else 0.0
     timeframe_results = {}
     for timeframe, analysis in analyses.items():
+        plan = execution_plans.get(timeframe, {})
+        zone_summary = _zone_summary(analysis.get("supply_demand_zones") or [])
         timeframe_results[timeframe.lower()] = {
             "signal": analysis.get("signal", "WAIT"),
             "direction": analysis.get("trend_direction", analysis.get("direction", "NONE")),
@@ -334,13 +452,29 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
             "setup_confidence": float(analysis.get("confidence", 0.0) or 0.0),
             "setup_type": analysis.get("setup_type", "unknown"),
             "model_version": analysis.get("trend_model_version", analysis.get("model_version", "unknown")),
+            "poi_direction": plan.get("direction", "NONE") if plan.get("tradable") else "NONE",
+            "poi_low": float(plan.get("entry_zone_low") or 0.0) if plan.get("tradable") else 0.0,
+            "poi_high": float(plan.get("entry_zone_high") or 0.0) if plan.get("tradable") else 0.0,
+            "poi_source": plan.get("entry_zone_source", "unavailable") if plan.get("tradable") else "unavailable",
+            "stop_loss": float(plan.get("stop_loss") or 0.0) if plan.get("tradable") else 0.0,
+            "take_profit": float(plan.get("take_profit") or 0.0) if plan.get("tradable") else 0.0,
+            "execution_confidence": float(plan.get("confidence") or 0.0),
+            "execution_model_status": (
+                "validated" if plan.get("tradable")
+                else plan.get("reason", "VALIDATED_EXECUTION_MODEL_UNAVAILABLE")
+            ),
+            **zone_summary,
         }
     return {
         "symbol": batch.symbol.upper(),
         "timeframe": "H4+H1+M30+M15+M5+M1",
         "signal": signal,
         "signal_reason": (
-            f"{mode}_{'CONFIRMED' if signal in {'BUY', 'SELL'} else 'WAIT'}"
+            "WAIT_FOR_VALIDATED_ML_POI"
+            if mode == "WAIT" and any(
+                value in {"BUY", "SELL"} for value in (scalp_signal, swing_signal)
+            )
+            else f"{mode}_{'CONFIRMED' if signal in {'BUY', 'SELL'} else 'WAIT'}"
         ),
         "confidence": round(confidence, 2),
         "setup_type": setup_type,
@@ -361,19 +495,48 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
             f"setup={setup_type}; model={entry_result.get('model_version', 'unavailable')}"
         ),
         "setup_context": (
-            f"H1 direction is mandatory; H4 {'agrees' if h4_aligned else 'is informational'}; "
-            "paired entry models must agree with H1."
+            (
+                "H1 confirms RANGE; H4 is contextual; M1 and M5 must agree, then "
+                "the validated ML execution model supplies the entry POI."
+            )
+            if h1_range_usable
+            else (
+                f"H1 direction is mandatory; H4 {'agrees' if h4_aligned else 'is informational'}; "
+                "paired entry models must agree with H1."
+            )
         ),
         "decision_explanation": (
-            f"H1 current trend {trend} is the hard direction gate; H4 overall trend "
-            f"{h4_direction} is optional; M1+M5 scalp and M15+M30 swing confluence."
+            (
+                "H1 RANGE is the regime gate; a scalp requires M1/M5 confluence and "
+                "a validated learned execution POI."
+            )
+            if h1_range_usable
+            else (
+                f"H1 current trend {trend} is the hard direction gate; H4 overall trend "
+                f"{h4_direction} is optional; M1+M5 scalp and M15+M30 swing confluence."
+            )
         ),
-        "confirmation_status": "DIRECTION_CONFIRMED" if h1_trend_usable else "WAIT_FOR_H1_DIRECTION",
+        "confirmation_status": (
+            "WAIT_FOR_ML_POI"
+            if mode == "WAIT" and signal == "WAIT" and not selected_plan
+            and any(value in {"BUY", "SELL"} for value in (scalp_signal, swing_signal))
+            else
+            "RANGE_SCALP_CONFIRMED"
+            if h1_range_usable and mode == "SCALP" and signal in {"BUY", "SELL"}
+            else "RANGE_WAIT_FOR_SCALP_SETUP"
+            if h1_range_usable
+            else "DIRECTION_CONFIRMED"
+            if h1_trend_usable
+            else "WAIT_FOR_H1_DIRECTION"
+        ),
         "h4_aligned": h4_aligned,
         "recommended_mode": mode,
         "planned_direction": signal,
-        "poi_direction": signal if signal in {"BUY", "SELL"} else "NONE",
-        "poi_reason": f"{mode} structural zone from {entry_result.get('model_version', 'unavailable')}",
+        "poi_direction": signal if signal in {"BUY", "SELL"} and valid_zone else "NONE",
+        "poi_reason": (
+            f"{mode} learned POI and exit plan from {selected_plan.get('model_version', 'unavailable')}"
+            if valid_zone else "No validated learned execution plan; structural zones are not used as POI"
+        ),
         "entry_direction": signal if entry_triggered else "WAIT",
         "entry_triggered": int(entry_triggered),
         "entry_status": "ZONE_TOUCHED" if entry_triggered else "WAIT_FOR_ZONE" if valid_zone else "NO_ENTRY_ZONE",
@@ -382,9 +545,17 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
         "entry_zone_high": zone_high if valid_zone else 0.0,
         "entry_candle_low": candle_low,
         "entry_candle_high": candle_high,
-        "entry_zone_source": entry_levels.get(
-            "potential_bullish_reversal_source" if signal == "BUY" else "potential_bearish_reversal_source",
-            "unavailable",
+        "entry_zone_source": selected_plan.get(
+            "entry_zone_source",
+            f"validated_ml_{mode.lower()}_execution" if valid_zone else "unavailable",
+        ),
+        "stop_loss": float(selected_plan.get("stop_loss") or 0.0) if valid_zone else 0.0,
+        "take_profit": float(selected_plan.get("take_profit") or 0.0) if valid_zone else 0.0,
+        "execution_confidence": float(selected_plan.get("confidence") or 0.0),
+        "execution_model_version": selected_plan.get("model_version", "unavailable"),
+        "execution_model_status": (
+            "validated" if valid_zone and mode in {"SCALP", "SWING"}
+            else selected_plan.get("reason", "VALIDATED_EXECUTION_MODEL_UNAVAILABLE")
         ),
         "risk_stop_atr": stop_atr,
         "risk_target_atr": target_atr,
@@ -405,6 +576,17 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
         "swing_signal": swing_signal,
         "swing_confidence": round(swing_confidence, 2),
         "timeframes": timeframe_results,
+        **{
+            f"{timeframe}_{zone_key}": value
+            for timeframe, result in timeframe_results.items()
+            for zone_key, value in result.items()
+            if zone_key in {
+                "poi_direction", "poi_low", "poi_high", "poi_source", "stop_loss",
+                "take_profit", "execution_confidence", "execution_model_status",
+                "demand_low", "demand_high", "demand_mid", "demand_distance",
+                "supply_low", "supply_high", "supply_mid", "supply_distance",
+            }
+        },
         "model_version": "|".join(
             f"{tf}:{result.get('model_version', 'unknown')}"
             for tf, result in timeframe_results.items()

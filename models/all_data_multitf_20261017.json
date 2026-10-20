@@ -1,0 +1,63 @@
+{
+  "accuracy": 0.26952047528113726,
+  "balanced_accuracy": 0.28305693258606157,
+  "roc_auc": 0.7629411798633465,
+  "purged_samples": 12,
+  "chronological_test_samples": 18852,
+  "classes": [
+    "breakout_buy",
+    "breakout_sell",
+    "continuation_buy",
+    "continuation_sell",
+    "failed_breakout_buy",
+    "failed_breakout_sell",
+    "no_edge",
+    "reversal_buy",
+    "reversal_sell"
+  ],
+  "class_recall": {
+    "breakout_buy": 0.15054835493519442,
+    "breakout_sell": 0.17288801571709234,
+    "continuation_buy": 0.3607058025110282,
+    "continuation_sell": 0.37229588276343334,
+    "failed_breakout_buy": 0.35376044568245124,
+    "failed_breakout_sell": 0.367816091954023,
+    "no_edge": 0.03822843822843823,
+    "reversal_buy": 0.3525730180806676,
+    "reversal_sell": 0.37869634340222574
+  },
+  "class_precision": {
+    "breakout_buy": 0.13904235727440148,
+    "breakout_sell": 0.15042735042735042,
+    "continuation_buy": 0.33543704638687283,
+    "continuation_sell": 0.3453074433656958,
+    "failed_breakout_buy": 0.0662148070907195,
+    "failed_breakout_sell": 0.06308526367668803,
+    "no_edge": 0.4304461942257218,
+    "reversal_buy": 0.35294117647058826,
+    "reversal_sell": 0.37978316326530615
+  },
+  "class_support": {
+    "breakout_buy": 1003,
+    "breakout_sell": 1018,
+    "continuation_buy": 2947,
+    "continuation_sell": 2866,
+    "failed_breakout_buy": 359,
+    "failed_breakout_sell": 348,
+    "no_edge": 4290,
+    "reversal_buy": 2876,
+    "reversal_sell": 3145
+  },
+  "grid_interval_mae_atr": {
+    "buy": 1.12968882444742,
+    "sell": 1.0981278639800607
+  },
+  "promotion_status": "rejected",
+  "forced_promotion": false,
+  "promotion_rejections": [
+    "walk-forward balanced accuracy below 0.55",
+    "chronological holdout balanced accuracy below 0.55",
+    "reversal_buy precision below 0.40",
+    "reversal_sell precision below 0.40"
+  ]
+}

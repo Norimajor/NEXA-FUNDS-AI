@@ -14,6 +14,7 @@ from core.feature_engine import TRAINING_FEATURE_NAMES, FeatureEngine
 from core.market_structure import MarketStructureAnalyzer
 from core.trend_engine import MARKET_TREND_LOOKBACK, training_market_trend
 from ml.dataset_builder import DatasetBuilder
+from ml.execution_levels import ExecutionLevelTrainer
 from ml.model_metrics import model_promotion_rejection_reasons
 from ml.model_registry import ModelRegistry
 from ml.model_trainer import ModelTrainer
@@ -110,6 +111,8 @@ def load_dataset_from_csvs(
     stop_atr=1.0,
     target_atr=1.5,
     grid_target_distance=None,
+    include_execution_targets=False,
+    execution_cost_atr=0.05,
 ):
     rows = []
     csv_paths = []
@@ -141,6 +144,8 @@ def load_dataset_from_csvs(
                     target_atr=target_atr,
                     grid_target_distance=grid_target_distance,
                     include_context_detectors=False,
+                    include_execution_targets=include_execution_targets,
+                    execution_cost_atr=execution_cost_atr,
                 )
                 first_index = max(MARKET_TREND_LOOKBACK, builder.horizon * 3)
                 eligible_rows = max(0, len(prepared) - first_index - builder.horizon)
@@ -173,6 +178,9 @@ p.add_argument('--stop-atr', type=float, default=1.0, help='Stop barrier distanc
 p.add_argument('--target-atr', type=float, default=1.5, help='Target barrier distance in ATR units.')
 p.add_argument('--grid-take-profit-distance', type=float, help='Optional price-distance target for direction-specific grid interval labels.')
 p.add_argument('--interval-only', action='store_true', help='Train only grid spacing regressors; do not replace or promote a direction classifier.')
+p.add_argument('--execution-levels', action='store_true', help='Train separate safety-gated ML scalp and swing POI/SL/TP models; saves candidates without promotion.')
+p.add_argument('--execution-mode', choices=('BOTH', 'SCALP', 'SWING'), default='BOTH', help='Execution profile(s) to train when --execution-levels is set.')
+p.add_argument('--execution-cost-atr', type=float, default=0.05, help='Conservative spread/commission/slippage cost assumption in ATR units for execution labels and validation.')
 p.add_argument('--trend-only', action='store_true', help='Train a separate BUY/SELL/RANGE trend classifier without changing the setup model.')
 p.add_argument('--max-trend-rows-per-file', type=int, default=1000, help='Evenly sampled trend examples per input file (default: 1000).')
 p.add_argument('--trend-class-weight', choices=('balanced', 'none'), default='balanced', help='Trend class weighting; use none to preserve natural label frequencies.')
@@ -201,6 +209,14 @@ if args.grid_take_profit_distance is not None and args.grid_take_profit_distance
     raise SystemExit('--grid-take-profit-distance must be greater than zero.')
 if args.interval_only and args.trend_only:
     raise SystemExit('--interval-only and --trend-only cannot be used together.')
+if args.execution_levels and (args.interval_only or args.trend_only):
+    raise SystemExit('--execution-levels cannot be combined with --interval-only or --trend-only.')
+if args.execution_cost_atr < 0 or not math.isfinite(args.execution_cost_atr):
+    raise SystemExit('--execution-cost-atr must be finite and non-negative.')
+if args.execution_levels and (
+    len(csv_paths) != 1 or not csv_paths[0].is_file() or csv_paths[0].suffix.lower() != '.csv'
+):
+    raise SystemExit('--execution-levels requires one timeframe-specific CSV file; train each symbol/timeframe separately.')
 if not 0 < args.trend_range_weight_scale <= 1:
     raise SystemExit('--trend-range-weight-scale must be greater than 0 and at most 1.')
 
@@ -262,9 +278,47 @@ dataset = load_dataset_from_csvs(
     stop_atr=args.stop_atr,
     target_atr=args.target_atr,
     grid_target_distance=args.grid_take_profit_distance,
+    include_execution_targets=args.execution_levels,
+    execution_cost_atr=args.execution_cost_atr,
 )
 if len(dataset) < 200:
     raise SystemExit(f'Only {len(dataset)} labelled examples were produced; supply more historical data.')
+
+if args.execution_levels:
+    features = dataset[TRAINING_FEATURE_NAMES].to_numpy(dtype=float)
+    future_candles = np.stack(dataset['_future_ohlc_atr'].to_numpy())
+    trainer = ExecutionLevelTrainer()
+    modes = ('SCALP', 'SWING') if args.execution_mode == 'BOTH' else (args.execution_mode,)
+    for mode in modes:
+        prefix = mode.lower()
+        result = trainer.train(
+            features,
+            dataset[f'{prefix}_action'].to_numpy(dtype=str),
+            dataset[
+                [f'{prefix}_{name}' for name in (
+                    'entry_offset_atr', 'zone_width_atr', 'stop_atr', 'target_atr'
+                )]
+            ].to_numpy(dtype=float),
+            future_candles,
+            TRAINING_FEATURE_NAMES,
+            mode,
+            f'{args.version}_{prefix}',
+            purge=args.horizon,
+            cost_atr=args.execution_cost_atr,
+        )
+        result['metrics']['training_configuration'] = {
+            'horizon': args.horizon,
+            'sample_stride': args.sample_stride,
+            'execution_cost_atr': args.execution_cost_atr,
+            'input_file': csv_paths[0].name,
+            'objective': 'positive after-cost holdout return subject to stop and drawdown gates',
+        }
+        Path(result['path']).with_suffix('.json').write_text(
+            json.dumps(result['metrics'], indent=2)
+        )
+        print(f'{mode} execution candidate:', json.dumps(result['metrics'], indent=2))
+        print(f'Execution model saved separately: {result["path"]}')
+    raise SystemExit(0)
 
 print('Label distribution:')
 print(dataset['label_name'].value_counts().sort_index().to_string())

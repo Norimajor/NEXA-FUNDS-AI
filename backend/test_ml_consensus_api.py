@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import unittest
+from contextlib import ExitStack
 from copy import deepcopy
 from unittest.mock import patch
 
@@ -70,6 +71,45 @@ class MlConsensusApiTests(unittest.TestCase):
                 "potential_bearish_reversal_source": "supply_zone",
             },
         }
+
+    def _execution_plan_patches(self, direction):
+        stack = ExitStack()
+        timeframe_engines = (
+            ml_consensus.h4_engine,
+            ml_consensus.h1_multi_engine,
+            ml_consensus.m30_entry_engine,
+            ml_consensus.m15_entry_engine,
+            ml_consensus.m5_entry_engine,
+            ml_consensus.m1_entry_engine,
+        )
+
+        def plan(_features, mode, _reference_price, _atr):
+            stop_atr, target_atr = (0.7, 1.0) if mode == "SCALP" else (1.0, 1.5)
+            return {
+                "available": True,
+                "tradable": True,
+                "direction": direction,
+                "confidence": 0.9,
+                "entry_price": 100.0,
+                "entry_zone_low": 99.5,
+                "entry_zone_high": 100.5,
+                "entry_zone_source": f"validated_ml_{mode.lower()}_execution",
+                "stop_loss": 99.0 if direction == "BUY" else 101.0,
+                "take_profit": 101.5 if direction == "BUY" else 98.5,
+                "stop_atr": stop_atr,
+                "target_atr": target_atr,
+                "model_version": f"test_{mode.lower()}_poi",
+            }
+
+        for engine in timeframe_engines:
+            stack.enter_context(
+                patch.object(
+                    engine.predictor,
+                    "predict_execution_plan",
+                    side_effect=plan,
+                )
+            )
+        return stack
 
     def test_consensus_route_accepts_ea_payload_and_returns_consensus_shape(self):
         self.assertIn("/api/ml/predict/consensus", app.openapi()["paths"])
@@ -321,6 +361,7 @@ class MlConsensusApiTests(unittest.TestCase):
         entry.update(signal="BUY", direction="BUY", confidence=72.0, atr=0.25)
         with (
             patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            self._execution_plan_patches("BUY"),
             patch.object(
                 ml_consensus,
                 "_prepare_and_analyze",
@@ -340,6 +381,110 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["execution_atr"], 0.25)
         self.assertTrue(result["entry_triggered"])
 
+    def test_six_timeframe_range_uses_learned_poi_without_demand_zone(self):
+        candle = self.payload["h1_candles"]
+        payload = {
+            **self.payload,
+            "h4_candles": candle,
+            "m30_candles": candle,
+            "m5_candles": candle,
+            "m1_candles": candle,
+            "operating_mode": "SCALP",
+        }
+        range_trend = {
+            "trend_direction": "RANGE",
+            "trend_strength": 0.8,
+            "signal": "WAIT",
+            "supply_demand_zones": [
+                {"type": "demand", "low": 97.0, "high": 98.0, "mid": 97.5, "distance": 2.5},
+                {"type": "supply", "low": 102.0, "high": 103.0, "mid": 102.5, "distance": 2.5},
+            ],
+        }
+        m1 = deepcopy(self.m15_result)
+        m1.update(
+            signal="BUY",
+            direction="BUY",
+            confidence=72.0,
+            price=100.0,
+            atr=0.25,
+            candle_low=99.8,
+            candle_high=100.2,
+            supply_demand_zones=[],
+        )
+        m5 = deepcopy(m1)
+        m15 = deepcopy(self.m15_result)
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            self._execution_plan_patches("BUY"),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[range_trend, range_trend, range_trend, m15, m5, m1],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["trend_direction"], "RANGE")
+        self.assertEqual(result["recommended_mode"], "SCALP")
+        self.assertEqual(result["signal"], "BUY")
+        self.assertEqual(result["confirmation_status"], "RANGE_SCALP_CONFIRMED")
+        self.assertEqual(result["entry_zone_source"], "validated_ml_scalp_execution")
+        self.assertEqual(result["entry_zone_low"], 99.5)
+        self.assertEqual(result["entry_zone_high"], 100.5)
+        self.assertTrue(result["entry_triggered"])
+        self.assertEqual(result["risk_stop_atr"], 0.7)
+        self.assertEqual(result["timeframes"]["h4"]["demand_low"], 97.0)
+        self.assertEqual(result["timeframes"]["h4"]["supply_high"], 103.0)
+        self.assertEqual(result["m1_poi_direction"], "BUY")
+        self.assertEqual(result["m1_poi_low"], 99.5)
+        self.assertEqual(result["m5_poi_high"], 100.5)
+
+    def test_six_timeframe_range_waits_without_validated_ml_poi(self):
+        candle = self.payload["h1_candles"]
+        payload = {
+            **self.payload,
+            "h4_candles": candle,
+            "m30_candles": candle,
+            "m5_candles": candle,
+            "m1_candles": candle,
+            "operating_mode": "SCALP",
+        }
+        range_trend = {"trend_direction": "RANGE", "trend_strength": 0.8, "signal": "WAIT"}
+        m1 = deepcopy(self.m15_result)
+        m1.update(
+            signal="BUY",
+            direction="BUY",
+            confidence=72.0,
+            price=100.0,
+            atr=0.25,
+            supply_demand_zones=[
+                {"type": "demand", "low": 98.0, "high": 99.0, "mid": 98.5, "distance": 1.0}
+            ],
+        )
+        m5 = deepcopy(m1)
+        with (
+            patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            patch.object(
+                ml_consensus,
+                "_prepare_and_analyze",
+                side_effect=[range_trend, range_trend, range_trend, m1, m5, m1],
+            ),
+        ):
+            response = self.client.post("/api/ml/predict/consensus", json=payload)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["recommended_mode"], "WAIT")
+        self.assertEqual(result["signal"], "WAIT")
+        self.assertEqual(result["signal_reason"], "WAIT_FOR_VALIDATED_ML_POI")
+        self.assertEqual(result["confirmation_status"], "WAIT_FOR_ML_POI")
+        self.assertEqual(result["poi_direction"], "NONE")
+        self.assertEqual(result["entry_zone_low"], 0.0)
+        self.assertEqual(result["entry_status"], "NO_ENTRY_ZONE")
+        self.assertGreater(result["m1_demand_low"], 0.0)
+
     def test_six_timeframe_route_allows_h1_direction_when_optional_h4_disagrees(self):
         candle = self.payload["h1_candles"]
         payload = {
@@ -356,6 +501,7 @@ class MlConsensusApiTests(unittest.TestCase):
         entry.update(signal="SELL", direction="SELL", confidence=72.0)
         with (
             patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            self._execution_plan_patches("SELL"),
             patch.object(
                 ml_consensus,
                 "_prepare_and_analyze",
@@ -370,7 +516,7 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertFalse(result["h4_aligned"])
         self.assertEqual(result["recommended_mode"], "SCALP")
         self.assertEqual(result["signal"], "SELL")
-        self.assertEqual(result["risk_target_atr"], 0.8)
+        self.assertEqual(result["risk_target_atr"], 1.0)
 
     def test_six_timeframe_route_blocks_entries_against_h1_even_when_h4_agrees(self):
         candle = self.payload["h1_candles"]
@@ -417,6 +563,7 @@ class MlConsensusApiTests(unittest.TestCase):
         entry.update(signal="BUY", direction="BUY", confidence=75.0, atr=0.5)
         with (
             patch.object(ml_consensus, "INGEST_API_KEY", ""),
+            self._execution_plan_patches("BUY"),
             patch.object(
                 ml_consensus,
                 "_prepare_and_analyze",

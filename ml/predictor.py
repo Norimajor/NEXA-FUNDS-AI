@@ -5,14 +5,26 @@ import joblib
 import numpy as np
 
 from core.trend_engine import MARKET_TREND_LOOKBACK
+from ml.execution_levels import EXECUTION_LEVEL_SCHEMA, MODE_LIMITS
 
 
 class ModelPredictor:
-    def __init__(self, path='models/current.joblib', threshold=.62, interval_path=None, trend_path=None):
+    def __init__(
+        self,
+        path='models/current.joblib',
+        threshold=.62,
+        interval_path=None,
+        trend_path=None,
+        execution_paths=None,
+    ):
         self.path = Path(path)
         self.interval_path = Path(interval_path) if interval_path else None
         self.trend_path = Path(trend_path) if trend_path else None
         self.threshold = threshold
+        self.execution_paths = {
+            mode: Path(path) for mode, path in (execution_paths or {}).items() if path
+        }
+        self.execution_bundles = {}
         self.bundle = None
         self.trend_bundle = None
         self._load()
@@ -29,6 +41,11 @@ class ModelPredictor:
                 )
         if self.trend_path and self.trend_path.exists():
             self.trend_bundle = joblib.load(self.trend_path)
+        self.execution_bundles = {
+            mode: joblib.load(path)
+            for mode, path in self.execution_paths.items()
+            if path.exists()
+        }
 
     @property
     def ready(self):
@@ -37,7 +54,117 @@ class ModelPredictor:
     def reload(self):
         self.bundle = None
         self.trend_bundle = None
+        self.execution_bundles = {}
         self._load()
+
+    def predict_execution_plan(self, features, mode, reference_price, atr):
+        unavailable = {
+            'available': False,
+            'tradable': False,
+            'mode': mode,
+            'reason': 'VALIDATED_EXECUTION_MODEL_UNAVAILABLE',
+        }
+        if mode not in MODE_LIMITS:
+            raise ValueError(f'Unsupported execution mode: {mode}')
+        bundle = self.execution_bundles.get(mode)
+        if not bundle:
+            return unavailable
+        if (
+            bundle.get('schema_version') != EXECUTION_LEVEL_SCHEMA
+            or bundle.get('mode') != mode
+            or bundle.get('validation_status') != 'passed'
+        ):
+            return {**unavailable, 'reason': 'EXECUTION_MODEL_NOT_VALIDATED'}
+        if not isinstance(features, Mapping) or reference_price <= 0 or atr <= 0:
+            return {**unavailable, 'reason': 'EXECUTION_FEATURES_OR_PRICE_INVALID'}
+
+        feature_names = bundle.get('feature_names')
+        classifier = bundle.get('classifier')
+        if not feature_names or classifier is None or not hasattr(classifier, 'predict_proba'):
+            raise ValueError('Validated execution model must define a probabilistic action model and feature_names.')
+        values = np.asarray(
+            [[float(features.get(name, 0.0)) for name in feature_names]], dtype=float
+        )
+        if not np.isfinite(values).all():
+            return {**unavailable, 'reason': 'EXECUTION_FEATURES_NONFINITE'}
+        probabilities = np.asarray(classifier.predict_proba(values)[0], dtype=float)
+        classes = np.asarray(bundle.get('classes', classifier.classes_), dtype=str)
+        if len(classes) != len(probabilities):
+            raise ValueError('Execution model classes do not match its probability output.')
+        best_index = int(np.argmax(probabilities))
+        direction = str(classes[best_index])
+        confidence = float(probabilities[best_index])
+        if direction not in {'BUY', 'SELL'}:
+            return {
+                **unavailable,
+                'available': True,
+                'reason': 'ML_NO_TRADE',
+                'confidence': confidence,
+                'model_version': bundle.get('version', 'unknown'),
+            }
+        if confidence < float(bundle.get('minimum_confidence', 1.0)):
+            return {
+                **unavailable,
+                'available': True,
+                'reason': 'EXECUTION_CONFIDENCE_BELOW_THRESHOLD',
+                'direction': direction,
+                'confidence': confidence,
+                'model_version': bundle.get('version', 'unknown'),
+            }
+
+        side_models = bundle.get('side_models', {}).get(direction)
+        if not side_models:
+            return {**unavailable, 'reason': 'EXECUTION_LEVEL_REGRESSORS_UNAVAILABLE'}
+        predictions = {}
+        for name, model in side_models.items():
+            predictions[name] = float(model.predict(values)[0])
+        offset = float(np.clip(predictions['entry_offset_atr'], -0.75, 0.75))
+        offset = min(offset, 0.08) if direction == 'BUY' else max(offset, -0.08)
+        width = float(np.clip(predictions['zone_width_atr'], 0.05, 0.5))
+        stop_distance = float(np.clip(
+            predictions['stop_atr'], 0.2, MODE_LIMITS[mode]['max_stop_atr']
+        ))
+        target_distance = float(np.clip(predictions['target_atr'], 0.3, 3.0))
+        if target_distance < stop_distance * MODE_LIMITS[mode]['min_reward_risk']:
+            return {
+                **unavailable,
+                'available': True,
+                'reason': 'ML_REWARD_RISK_BELOW_SAFETY_FLOOR',
+                'direction': direction,
+                'confidence': confidence,
+                'model_version': bundle.get('version', 'unknown'),
+            }
+        center = reference_price + offset * atr
+        half_width = width * atr / 2.0
+        stop_anchor = center + half_width if direction == 'BUY' else center - half_width
+        stop_loss = (
+            stop_anchor - stop_distance * atr
+            if direction == 'BUY'
+            else stop_anchor + stop_distance * atr
+        )
+        take_profit = (
+            stop_anchor + target_distance * atr
+            if direction == 'BUY'
+            else stop_anchor - target_distance * atr
+        )
+        return {
+            'available': True,
+            'tradable': True,
+            'mode': mode,
+            'reason': 'VALIDATED_ML_PLAN',
+            'direction': direction,
+            'confidence': confidence,
+            'entry_price': center,
+            'entry_zone_low': center - half_width,
+            'entry_zone_high': center + half_width,
+            'entry_zone_source': f'validated_ml_{mode.lower()}_execution',
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'stop_atr': stop_distance,
+            'target_atr': target_distance,
+            'model_version': bundle.get('version', 'unknown'),
+            'validation_status': bundle.get('validation_status'),
+        }
 
     def predict_trend(self, features):
         if not self.trend_bundle:

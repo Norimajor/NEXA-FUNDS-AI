@@ -13,7 +13,7 @@
 #define DASHBOARD_VERSION NEXA_VERSION
 #define EA_MAGIC_NUMBER 123456
 // Optional build-time ML credential. Paste the Render INGEST_API_KEY between the quotes before compiling.
-#define NEXA_ML_API_KEY ""
+#define NEXA_ML_API_KEY "8d3f0c29059244368ac6203b1b32118ae2d27035e79f4c559b0f9106d952ab32"
 const double SCALP_MIN_ML_CONFIDENCE=60.0;
 
 #include <Object.mqh>
@@ -26,8 +26,12 @@ const double SCALP_MIN_ML_CONFIDENCE=60.0;
 enum NEXA_DASH_THEME { THEME_GOLD=0, THEME_EMERALD, THEME_OCEAN, THEME_CRIMSON, THEME_VIOLET, THEME_CYAN, THEME_SILVER, THEME_AMBER };
 enum NEXAOperatingMode { NEXA_AUTO=0, NEXA_SWING=1, NEXA_SCALP=2 };
 
-// The only MT5 Inputs field. All live controls are on the chart dashboard.
+// MT5 inputs provide licensing and optional ML connection settings; live controls are on the chart dashboard.
 input string InpLicenseKey = ""; // Account-bound key issued by the NexaFunds website
+input group "=== NEXA ML SERVICE CONNECTION ==="
+input string InpMLApiKey = ""; // Optional per-terminal key; never put a shared production key in distributed source
+input int InpMLTimeoutMs = 60000; // Allow Render cold starts and slower inference responses
+input int InpMLCheckSeconds = 5; // Minimum delay between prediction requests
 const string LICENSE_API_BASE_URL = "https://nexafunds-steel.vercel.app";
 const string LICENSE_PRODUCT_ID = "nexa-ai-pro";
 
@@ -37,7 +41,7 @@ bool InpLogRejectedDecisions=true, InpShowDashboard=true;
 ENUM_BASE_CORNER InpDashboardCorner=CORNER_LEFT_UPPER;
 const int InpDashboardX=16, InpDashboardY=24;
 const string ML_RENDER_BASE_URL="https://nexa-funds-ai.onrender.com";
-int runtime_ml_timeout_ms=30000, runtime_ml_check_seconds=30, runtime_prediction_max_age_seconds=30;
+int runtime_ml_timeout_ms=60000, runtime_ml_check_seconds=5, runtime_prediction_max_age_seconds=30;
 int runtime_refresh_ms=100, runtime_max_daily=40, runtime_max_hourly=10;
 int runtime_min_trade_minutes=2, runtime_max_positions=2, runtime_scalp_max_positions=20;
 bool runtime_spread_filter=false;
@@ -46,6 +50,7 @@ int runtime_broker_utc_offset=0;
 const int InpAsianStartUTC=0, InpAsianEndUTC=8, InpLondonStartUTC=7, InpLondonEndUTC=16;
 const int InpNewYorkStartUTC=12, InpNewYorkEndUTC=21;
 string runtime_ml_api_key="";
+string runtime_ml_key_source="not configured";
 bool runtime_license_valid=false;
 long runtime_licensed_account=0;
 long runtime_licensed_trade_mode=-1;
@@ -129,6 +134,9 @@ string active_trading_mode="WAIT";
 int runtime_news_minutes=30, runtime_session_start=8, runtime_session_end=18;
 int dashboard_x=16, dashboard_y=24, dashboard_scale=100, dashboard_theme=0, dashboard_tab=0;
 bool dashboard_minimized=false;
+bool dashboard_track_page_objects=false;
+string dashboard_page_object_names[];
+int dashboard_page_object_tabs[];
 
 
 datetime last_ml_communication_log=0;
@@ -154,7 +162,7 @@ string ml_m30_signal="WAIT", ml_m15_signal="WAIT", ml_m5_signal="WAIT", ml_m1_si
 string ml_h1_setup_type="unknown";
 string ml_trend_direction="NONE", ml_confirmation_status="NO_TREND_DIRECTION";
 string ml_poi_direction="NONE", ml_setup_reason="No ML explanation received";
-string ml_setup_context="No setup context received", ml_poi_reason="No structural POI";
+string ml_setup_context="No setup context received", ml_poi_reason="No validated ML POI";
 string ml_trend_reason="Trend evidence unavailable", ml_model_class="unknown", ml_runner_up_class="unknown";
 string ml_h1_model_version="unknown", ml_m15_model_version="unknown";
 string ml_h1_candle_time="", ml_m15_candle_time="";
@@ -172,6 +180,8 @@ double ml_potential_bullish_reversal_low=0, ml_potential_bullish_reversal_high=0
 double ml_potential_bearish_reversal_low=0, ml_potential_bearish_reversal_high=0;
 double ml_entry_price=0, ml_entry_zone_low=0, ml_entry_zone_high=0;
 double ml_entry_candle_low=0, ml_entry_candle_high=0;
+double ml_tf_poi_low[6], ml_tf_poi_high[6];
+string ml_tf_poi_direction[6];
 double ml_model_class_probability=0, ml_runner_up_probability=0;
 double ml_breakout_up=0, ml_breakout_down=0;
 double ml_stop_loss=0, ml_take_profit=0, ml_grid_spacing=0;
@@ -247,6 +257,8 @@ bool MLH1DirectionMatches(string side,string h1_direction) {
 }
 bool MLTimeframesAlignedForMode(string side,string mode) {
     if(side!="BUY" && side!="SELL") return false;
+    if(mode=="SCALP" && ml_h1_signal=="RANGE" && ml_trend_direction=="RANGE")
+        return ml_m1_signal==side && ml_m5_signal==side;
     if(ml_h1_signal!=side || !MLH1DirectionMatches(side,ml_trend_direction)) return false;
     if(mode=="SCALP") return ml_m1_signal==side && ml_m5_signal==side;
     if(mode=="SWING") return ml_m15_signal==side && ml_m30_signal==side;
@@ -302,8 +314,8 @@ double ScalpGridSpacing(string direction);
 //+------------------------------------------------------------------+
 string DashboardBool(bool value) { return value ? "ON" : "OFF"; }
 
-// At 100% scale this is about 284 px, or 7.5 cm on a 96-DPI display.
-const double DASHBOARD_WIDTH_FACTOR=0.63;
+// At 100% scale this is about 315 px, or 8.3 cm on a 96-DPI display.
+const double DASHBOARD_WIDTH_FACTOR=0.70;
 double DashboardScaleFactor() { return DASHBOARD_WIDTH_FACTOR*(double)dashboard_scale/100.0; }
 int DS(int value) { return (int)MathRound(value*DashboardScaleFactor()); }
 
@@ -353,19 +365,31 @@ string FontNumeric()    { return "Consolas"; }
 
 string DashName(string name) { return dashboard_prefix+name; }
 void SetObjectVisible(string name,bool visible) { if(ObjectFind(0,DashName(name))>=0) ObjectSetInteger(0,DashName(name),OBJPROP_TIMEFRAMES,visible?OBJ_ALL_PERIODS:OBJ_NO_PERIODS); }
-
-//--- raw pixel rectangle, used for corner masks and hairlines
-void RawRect(string name,int px,int py,int w,int h,color bg,int zorder) {
-    string n=DashName(name); if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_RECTANGLE_LABEL,0,0,0);
-    ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner);
-    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,px); ObjectSetInteger(0,n,OBJPROP_YDISTANCE,py);
-    ObjectSetInteger(0,n,OBJPROP_XSIZE,MathMax(1,w)); ObjectSetInteger(0,n,OBJPROP_YSIZE,MathMax(1,h));
-    ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg); ObjectSetInteger(0,n,OBJPROP_BORDER_TYPE,BORDER_FLAT); ObjectSetInteger(0,n,OBJPROP_COLOR,bg);
-    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false); ObjectSetInteger(0,n,OBJPROP_HIDDEN,true); ObjectSetInteger(0,n,OBJPROP_ZORDER,zorder);
+void TrackDashboardPageObject(string name) {
+    if(!dashboard_track_page_objects) return;
+    string full_name=DashName(name);
+    for(int i=0;i<ArraySize(dashboard_page_object_names);i++)
+        if(dashboard_page_object_names[i]==full_name && dashboard_page_object_tabs[i]==dashboard_tab) return;
+    int count=ArraySize(dashboard_page_object_names);
+    ArrayResize(dashboard_page_object_names,count+1);
+    ArrayResize(dashboard_page_object_tabs,count+1);
+    dashboard_page_object_names[count]=full_name;
+    dashboard_page_object_tabs[count]=dashboard_tab;
 }
-//--- MT5 objects are square, so the corners are masked with the surrounding colour
-void RoundCorners(string base,int px,int py,int pw,int ph,color outer,int radius,int zorder) { /* Native square objects: no costly masking objects. */ }
+
+//+------------------------------------------------------------------+
+//| Clean Dashboard Render Primitives (Optimized, No Mask Clutter)   |
+//+------------------------------------------------------------------+
+void RawRect(string name,int px,int py,int w,int h,color bg,int zorder) {
+    // Unused in clean renderer: eliminates background clutter
+}
+
+void RoundCorners(string base,int px,int py,int pw,int ph,color outer,int radius,int zorder) {
+    // Clean renderer eliminates redundant corner-mask rectangle clutter
+}
+
 void SetDashboardLabel(string name,string text,int x,int y,int font_size,color text_color,string font="") {
+    TrackDashboardPageObject(name);
     string n=DashName(name);
     if(dashboard_values_only) {
         if(ObjectGetString(0,n,OBJPROP_TEXT)!=text) {
@@ -377,41 +401,64 @@ void SetDashboardLabel(string name,string text,int x,int y,int font_size,color t
         return;
     }
     if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_LABEL,0,0,0);
-    ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner); ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
-    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y)); ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(6,DS(font_size)));
-    ObjectSetInteger(0,n,OBJPROP_COLOR,text_color); ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
-    ObjectSetString(0,n,OBJPROP_FONT,font==""?FontRegular():font); ObjectSetString(0,n,OBJPROP_TEXT,text);
-    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false); ObjectSetInteger(0,n,OBJPROP_HIDDEN,true); ObjectSetInteger(0,n,OBJPROP_ZORDER,14);
+    ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner);
+    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
+    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y));
+    ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(6,DS(font_size)));
+    ObjectSetInteger(0,n,OBJPROP_COLOR,text_color);
+    ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
+    ObjectSetString(0,n,OBJPROP_FONT,font==""?FontRegular():font);
+    ObjectSetString(0,n,OBJPROP_TEXT,text);
+    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+    ObjectSetInteger(0,n,OBJPROP_HIDDEN,false);
+    ObjectSetInteger(0,n,OBJPROP_ZORDER,14);
 }
+
 void SetDashboardPanel(string name,int x,int y,int width,int height,color bg,color border,bool draggable=false) {
-    if(dashboard_values_only)return;
-    string n=DashName(name); bool created=ObjectFind(0,n)<0;
+    if(dashboard_values_only) return;
+    TrackDashboardPageObject(name);
+    string n=DashName(name);
+    bool created=ObjectFind(0,n)<0;
     if(created) ObjectCreate(0,n,OBJ_RECTANGLE_LABEL,0,0,0);
-    ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner); ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x)); ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y));
-    ObjectSetInteger(0,n,OBJPROP_XSIZE,DS(width)); ObjectSetInteger(0,n,OBJPROP_YSIZE,DS(height));
+    ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner);
+    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
+    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y));
+    ObjectSetInteger(0,n,OBJPROP_XSIZE,DS(width));
+    ObjectSetInteger(0,n,OBJPROP_YSIZE,DS(height));
     ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg);
-    //--- rectangle labels take their border colour from OBJPROP_COLOR with a flat border
-    ObjectSetInteger(0,n,OBJPROP_BORDER_TYPE,BORDER_FLAT); ObjectSetInteger(0,n,OBJPROP_COLOR,border);
+    ObjectSetInteger(0,n,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+    ObjectSetInteger(0,n,OBJPROP_COLOR,border);
     ObjectSetInteger(0,n,OBJPROP_SELECTABLE,draggable);
     if(created) ObjectSetInteger(0,n,OBJPROP_SELECTED,false);
-    ObjectSetInteger(0,n,OBJPROP_HIDDEN,!draggable); ObjectSetInteger(0,n,OBJPROP_ZORDER,draggable?2:0);
+    ObjectSetInteger(0,n,OBJPROP_HIDDEN,false);
+    ObjectSetInteger(0,n,OBJPROP_ZORDER,draggable?1:2);
 }
-//--- panel with masked (rounded) corners
+
 void SetRoundedPanel(string name,int x,int y,int width,int height,color bg,color border,color outer,int radius=3,bool draggable=false) {
     SetDashboardPanel(name,x,y,width,height,bg,border,draggable);
-    RoundCorners(name,dashboard_x+DS(x),dashboard_y+DS(y),DS(width),DS(height),outer,MathMax(DS(radius),DS(16)),draggable?3:1);
 }
+
 void SetDashboardButton(string name,string text,int x,int y,int width,int height,color bg,color border,color text_color=clrWhite,color outer=clrNONE,int radius=2) {
-    if(dashboard_values_only)return;
-    string n=DashName(name); if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_BUTTON,0,0,0);
-    ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner); ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
-    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y)); ObjectSetInteger(0,n,OBJPROP_XSIZE,DS(width)); ObjectSetInteger(0,n,OBJPROP_YSIZE,DS(height));
-    ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(6,DS(8))); ObjectSetInteger(0,n,OBJPROP_COLOR,text_color);
-    ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg); ObjectSetInteger(0,n,OBJPROP_BORDER_COLOR,bg);
-    ObjectSetString(0,n,OBJPROP_FONT,FontMedium()); ObjectSetString(0,n,OBJPROP_TEXT,text);
-    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false); ObjectSetInteger(0,n,OBJPROP_HIDDEN,true); ObjectSetInteger(0,n,OBJPROP_ZORDER,10);
-    RoundCorners(name,dashboard_x+DS(x),dashboard_y+DS(y),DS(width),DS(height),outer==clrNONE?DashBg():outer,MathMax(DS(radius),DS(10)),12);
+    if(dashboard_values_only) return;
+    TrackDashboardPageObject(name);
+    string n=DashName(name);
+    if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_BUTTON,0,0,0);
+    ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner);
+    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
+    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y));
+    ObjectSetInteger(0,n,OBJPROP_XSIZE,DS(width));
+    ObjectSetInteger(0,n,OBJPROP_YSIZE,DS(height));
+    ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(6,DS(8)));
+    ObjectSetInteger(0,n,OBJPROP_COLOR,text_color);
+    ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg);
+    ObjectSetInteger(0,n,OBJPROP_BORDER_COLOR,border);
+    ObjectSetString(0,n,OBJPROP_FONT,FontMedium());
+    ObjectSetString(0,n,OBJPROP_TEXT,text);
+    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+    ObjectSetInteger(0,n,OBJPROP_HIDDEN,false);
+    ObjectSetInteger(0,n,OBJPROP_ZORDER,10);
 }
+
 void DrawSection(string title,int y) {
     SetDashboardPanel("SBAR_"+title,16,y+2,3,12,DashAccent(),DashAccent());
     SetDashboardLabel("SEC_"+title,title,25,y,9,DashAccent(),FontMedium());
@@ -528,12 +575,53 @@ void RemoveMLPointOfInterest() {
     ObjectDelete(0,ml_poi_prefix+"ZONE");
     ObjectDelete(0,ml_poi_prefix+"MID");
     ObjectDelete(0,ml_poi_prefix+"LABEL");
+    ObjectDelete(0,ml_poi_prefix+"BULL_ZONE");
+    ObjectDelete(0,ml_poi_prefix+"BULL_LABEL");
+    ObjectDelete(0,ml_poi_prefix+"BEAR_ZONE");
+    ObjectDelete(0,ml_poi_prefix+"BEAR_LABEL");
+    string timeframes[6]={"H4","H1","M30","M15","M5","M1"};
+    for(int i=0;i<ArraySize(timeframes);i++) {
+        string key="TF_"+timeframes[i]+"_";
+        ObjectDelete(0,ml_poi_prefix+key+"ZONE");
+        ObjectDelete(0,ml_poi_prefix+key+"LABEL");
+        ObjectDelete(0,ml_poi_prefix+key+"DEMAND_ZONE");
+        ObjectDelete(0,ml_poi_prefix+key+"DEMAND_LABEL");
+        ObjectDelete(0,ml_poi_prefix+key+"SUPPLY_ZONE");
+        ObjectDelete(0,ml_poi_prefix+key+"SUPPLY_LABEL");
+    }
+}
+void DrawMLPriceZone(string suffix,string caption,double low,double high,color zone_color,datetime left,datetime right) {
+    string zone=ml_poi_prefix+suffix+"ZONE";
+    string label=ml_poi_prefix+suffix+"LABEL";
+    if(low<=0 || high<low) {
+        ObjectDelete(0,zone);
+        ObjectDelete(0,label);
+        return;
+    }
+    if(ObjectFind(0,zone)<0) ObjectCreate(0,zone,OBJ_RECTANGLE,0,left,high,right,low);
+    else {
+        ObjectMove(0,zone,0,left,high);
+        ObjectMove(0,zone,1,right,low);
+    }
+    ObjectSetInteger(0,zone,OBJPROP_COLOR,zone_color);
+    ObjectSetInteger(0,zone,OBJPROP_STYLE,STYLE_DASH);
+    ObjectSetInteger(0,zone,OBJPROP_WIDTH,1);
+    ObjectSetInteger(0,zone,OBJPROP_FILL,true);
+    ObjectSetInteger(0,zone,OBJPROP_BACK,true);
+    ObjectSetInteger(0,zone,OBJPROP_SELECTABLE,false);
+    ObjectSetInteger(0,zone,OBJPROP_HIDDEN,true);
+    if(ObjectFind(0,label)<0) ObjectCreate(0,label,OBJ_TEXT,0,right,high);
+    else ObjectMove(0,label,0,right,high);
+    ObjectSetString(0,label,OBJPROP_TEXT,caption);
+    ObjectSetString(0,label,OBJPROP_FONT,FontMedium());
+    ObjectSetInteger(0,label,OBJPROP_FONTSIZE,8);
+    ObjectSetInteger(0,label,OBJPROP_COLOR,zone_color);
+    ObjectSetInteger(0,label,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
+    ObjectSetInteger(0,label,OBJPROP_SELECTABLE,false);
+    ObjectSetInteger(0,label,OBJPROP_HIDDEN,true);
 }
 void DrawMLPointOfInterest() {
-    bool valid=ml_prediction_available &&
-        (ml_poi_direction=="BUY" || ml_poi_direction=="SELL") &&
-        ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low;
-    if(!valid) {
+    if(!ml_prediction_available) {
         RemoveMLPointOfInterest();
         return;
     }
@@ -541,39 +629,42 @@ void DrawMLPointOfInterest() {
     int seconds=MathMax(1,PeriodSeconds(_Period));
     datetime left=now-seconds*20;
     datetime right=now+seconds*6;
-    color poi_color=ml_poi_direction=="BUY"?DashGreen():DashRed();
-    string zone=ml_poi_prefix+"ZONE";
-    if(ObjectFind(0,zone)<0) ObjectCreate(0,zone,OBJ_RECTANGLE,0,left,ml_entry_zone_high,right,ml_entry_zone_low);
-    else {
-        ObjectMove(0,zone,0,left,ml_entry_zone_high);
-        ObjectMove(0,zone,1,right,ml_entry_zone_low);
+    string entry_direction=ml_poi_direction;
+    if(entry_direction!="BUY" && entry_direction!="SELL") entry_direction=ml_planned_direction;
+    bool valid_entry=(entry_direction=="BUY" || entry_direction=="SELL") &&
+        ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low &&
+        StringFind(ml_entry_zone_source,"validated_ml_")==0;
+    color poi_color=entry_direction=="BUY"?DashGreen():DashRed();
+    if(valid_entry) {
+        DrawMLPriceZone("","NEXA ML ENTRY "+entry_direction+" | "+ml_entry_zone_source,
+            ml_entry_zone_low,ml_entry_zone_high,poi_color,left,right);
+    } else {
+        ObjectDelete(0,ml_poi_prefix+"ZONE");
+        ObjectDelete(0,ml_poi_prefix+"LABEL");
     }
-    ObjectSetInteger(0,zone,OBJPROP_COLOR,poi_color);
-    ObjectSetInteger(0,zone,OBJPROP_STYLE,STYLE_DASH);
-    ObjectSetInteger(0,zone,OBJPROP_WIDTH,1);
-    ObjectSetInteger(0,zone,OBJPROP_FILL,true);
-    ObjectSetInteger(0,zone,OBJPROP_BACK,true);
-    ObjectSetInteger(0,zone,OBJPROP_SELECTABLE,false);
-    ObjectSetInteger(0,zone,OBJPROP_HIDDEN,true);
     string mid=ml_poi_prefix+"MID";
-    if(ObjectFind(0,mid)<0) ObjectCreate(0,mid,OBJ_HLINE,0,0,ml_entry_price>0?ml_entry_price:(ml_entry_zone_low+ml_entry_zone_high)*0.5);
-    ObjectSetDouble(0,mid,OBJPROP_PRICE,ml_entry_price>0?ml_entry_price:(ml_entry_zone_low+ml_entry_zone_high)*0.5);
-    ObjectSetInteger(0,mid,OBJPROP_COLOR,poi_color);
-    ObjectSetInteger(0,mid,OBJPROP_STYLE,STYLE_DOT);
-    ObjectSetInteger(0,mid,OBJPROP_SELECTABLE,false);
-    ObjectSetInteger(0,mid,OBJPROP_HIDDEN,true);
-    string label=ml_poi_prefix+"LABEL";
-    string caption=StringFormat("NEXA ML POI %s | %s | %s",
-        ml_poi_direction,ml_confirmation_status,ml_entry_zone_source);
-    if(ObjectFind(0,label)<0) ObjectCreate(0,label,OBJ_TEXT,0,right,ml_entry_zone_high);
-    else ObjectMove(0,label,0,right,ml_entry_zone_high);
-    ObjectSetString(0,label,OBJPROP_TEXT,caption);
-    ObjectSetString(0,label,OBJPROP_FONT,FontMedium());
-    ObjectSetInteger(0,label,OBJPROP_FONTSIZE,8);
-    ObjectSetInteger(0,label,OBJPROP_COLOR,poi_color);
-    ObjectSetInteger(0,label,OBJPROP_ANCHOR,ANCHOR_LEFT_LOWER);
-    ObjectSetInteger(0,label,OBJPROP_SELECTABLE,false);
-    ObjectSetInteger(0,label,OBJPROP_HIDDEN,true);
+    if(valid_entry) {
+        double entry_level=ml_entry_price>0?ml_entry_price:(ml_entry_zone_low+ml_entry_zone_high)*0.5;
+        if(ObjectFind(0,mid)<0) ObjectCreate(0,mid,OBJ_HLINE,0,0,entry_level);
+        ObjectSetDouble(0,mid,OBJPROP_PRICE,entry_level);
+        ObjectSetInteger(0,mid,OBJPROP_COLOR,poi_color);
+        ObjectSetInteger(0,mid,OBJPROP_STYLE,STYLE_DOT);
+        ObjectSetInteger(0,mid,OBJPROP_SELECTABLE,false);
+        ObjectSetInteger(0,mid,OBJPROP_HIDDEN,true);
+    } else ObjectDelete(0,mid);
+    string timeframes[6]={"H4","H1","M30","M15","M5","M1"};
+    for(int i=0;i<ArraySize(timeframes);i++) {
+        string suffix="TF_"+timeframes[i]+"_";
+        color tf_color=ml_tf_poi_direction[i]=="BUY"?DashGreen():DashRed();
+        if((ml_tf_poi_direction[i]=="BUY" || ml_tf_poi_direction[i]=="SELL") &&
+           ml_tf_poi_low[i]>0 && ml_tf_poi_high[i]>=ml_tf_poi_low[i])
+            DrawMLPriceZone(suffix,"NEXA "+timeframes[i]+" ML POI "+ml_tf_poi_direction[i],
+                ml_tf_poi_low[i],ml_tf_poi_high[i],tf_color,left,right);
+        else {
+            ObjectDelete(0,ml_poi_prefix+suffix+"ZONE");
+            ObjectDelete(0,ml_poi_prefix+suffix+"LABEL");
+        }
+    }
     ChartRedraw();
 }
 void DrawAITab() {
@@ -661,28 +752,77 @@ void DrawSettingsTab() {
     SetDashboardLabel("RiskMoved","Risk & lot sizing are on the Trade tab",18,452,8,DashMuted());
 }
 void CreateDashboard() {
-    if(!InpShowDashboard)return; int h=dashboard_minimized?48:540;
-    SetRoundedPanel("Frame",0,0,450,h,DashBg(),DashBorder(),ChartBackground(),8);
-    SetRoundedPanel("DragHandle",1,1,448,45,DashPanel(),DashBorderSoft(),DashBg(),6,true);
-    SetDashboardPanel("HeaderLine",1,46,448,1,DashAccent(),DashAccent());
-    SetDashboardLabel("Brand",StringFormat("NEXA AI %s",NEXA_VERSION),16,11,14,DashAccent(),FontMedium());
-    bool active=runtime_trading_enabled;
-    color state_color=active?DashGreen():DashRed();
-    SetRoundedPanel("StatusPill",296,12,92,22,MixColor(state_color,DashPanel(),0.16),state_color,DashPanel(),3);
-    SetDashboardLabel("Status",active?"ACTIVE":"STOPPED",312,16,9,state_color,FontMedium());
-    SetDashboardButton("MinTop",dashboard_minimized?"+":"-",406,11,30,23,DashPanel(),DashBorder(),DashAccent(),DashPanel(),2);
-    if(dashboard_minimized) {
-        RoundCorners("Frame",dashboard_x,dashboard_y,DS(450),DS(h),ChartBackground(),DS(24),30);
-        return;
-    }
+    if(!InpShowDashboard) return;
+    int h = dashboard_minimized ? 48 : 540;
+
+    // Master interactive canvas & frame
+    SetDashboardPanel("Canvas", 0, 0, 450, h, DashBg(), DashBorder(), true);
+    SetDashboardPanel("DragHandle", 1, 1, 448, 45, DashPanel(), DashBorderSoft(), true);
+    SetDashboardPanel("HeaderLine", 1, 46, 448, 1, DashAccent(), DashAccent());
+    SetDashboardLabel("Brand", StringFormat("NEXA AI %s", NEXA_VERSION), 16, 11, 14, DashAccent(), FontMedium());
+
+    bool active = runtime_trading_enabled;
+    color state_color = active ? DashGreen() : DashRed();
+    SetDashboardPanel("StatusPill", 296, 12, 92, 22, MixColor(state_color, DashPanel(), 0.16), state_color);
+    SetDashboardLabel("Status", active ? "ACTIVE" : "STOPPED", 312, 16, 9, state_color, FontMedium());
+    SetDashboardButton("MinTop", dashboard_minimized ? "+" : "-", 406, 11, 30, 23, DashPanel(), DashBorder(), DashAccent());
+
+    if(dashboard_minimized) return;
+
     DrawTabs();
-    if(dashboard_tab==0)DrawTradeTab(); else if(dashboard_tab==1)DrawStrategyTab(); else if(dashboard_tab==2)DrawInfoTab(); else if(dashboard_tab==3)DrawNewsTab(); else if(dashboard_tab==4)DrawAITab(); else if(dashboard_tab==5)DrawLogsTab(); else DrawSettingsTab();
-    SetDashboardPanel("FooterLine",14,508,422,1,DashBorderSoft(),DashBorderSoft());
-    SetDashboardLabel("Footer",StringFormat("SERVER  %s  |  %s",TimeToString(TimeCurrent(),TIME_DATE),TimeToString(TimeCurrent(),TIME_SECONDS)),18,516,8,DashMuted());
-    SetDashboardLabel("FooterState",MLLinkStateText(),330,516,8,MLLinkColor());
-    RoundCorners("Frame",dashboard_x,dashboard_y,DS(450),DS(h),ChartBackground(),DS(24),30);
+    dashboard_track_page_objects = !dashboard_values_only;
+    if(dashboard_tab == 0) DrawTradeTab();
+    else if(dashboard_tab == 1) DrawStrategyTab();
+    else if(dashboard_tab == 2) DrawInfoTab();
+    else if(dashboard_tab == 3) DrawNewsTab();
+    else if(dashboard_tab == 4) DrawAITab();
+    else if(dashboard_tab == 5) DrawLogsTab();
+    else DrawSettingsTab();
+    dashboard_track_page_objects = false;
+
+    SetDashboardPanel("FooterLine", 14, 508, 422, 1, DashBorderSoft(), DashBorderSoft());
+    SetDashboardLabel("Footer", StringFormat("SERVER  %s  |  %s", TimeToString(TimeCurrent(), TIME_DATE), TimeToString(TimeCurrent(), TIME_SECONDS)), 18, 516, 8, DashMuted());
+    SetDashboardLabel("FooterState", MLLinkStateText(), 330, 516, 8, MLLinkColor());
 }
 void RenderDashboard() { if(!InpShowDashboard)return; RemoveDashboard(); CreateDashboard(); ChartRedraw(); }
+bool DashboardTabHasObjects(int tab) {
+    for(int i=0;i<ArraySize(dashboard_page_object_names);i++)
+        if(dashboard_page_object_tabs[i]==tab && ObjectFind(0,dashboard_page_object_names[i])>=0)
+            return true;
+    return false;
+}
+void SetDashboardTabVisible(int tab,bool visible) {
+    for(int i=0;i<ArraySize(dashboard_page_object_names);i++) {
+        if(dashboard_page_object_tabs[i]!=tab || ObjectFind(0,dashboard_page_object_names[i])<0) continue;
+        ObjectSetInteger(0,dashboard_page_object_names[i],OBJPROP_TIMEFRAMES,
+            visible?OBJ_ALL_PERIODS:OBJ_NO_PERIODS);
+    }
+}
+void SetDashboardTabButtonState(int tab,bool active) {
+    string name=DashName("TAB"+IntegerToString(tab));
+    if(ObjectFind(0,name)<0) return;
+    color fill=active?DashAccent():DashCard();
+    ObjectSetInteger(0,name,OBJPROP_BGCOLOR,fill);
+    ObjectSetInteger(0,name,OBJPROP_BORDER_COLOR,fill);
+    ObjectSetInteger(0,name,OBJPROP_COLOR,active?DashOnAccent():DashMuted());
+    ObjectSetInteger(0,name,OBJPROP_STATE,false);
+}
+void SwitchDashboardTab(int tab) {
+    if(tab<0 || tab>6 || tab==dashboard_tab) return;
+    int previous_tab=dashboard_tab;
+    bool tab_already_built=DashboardTabHasObjects(tab);
+    dashboard_tab=tab;
+    SetDashboardTabVisible(previous_tab,false);
+    if(tab_already_built) {
+        SetDashboardTabVisible(tab,true);
+        SetDashboardTabButtonState(previous_tab,false);
+        SetDashboardTabButtonState(tab,true);
+        UpdateDashboard();
+    } else {
+        CreateDashboard();
+    }
+    ChartRedraw();
+}
 void UpdateDashboard() {
     if(!InpShowDashboard)return;
     string drag_handle=DashName("DragHandle");
@@ -695,7 +835,12 @@ void UpdateDashboard() {
     dashboard_values_only=false;
     if(dashboard_values_changed)ChartRedraw();
 }
-void RemoveDashboard() { ObjectsDeleteAll(0,dashboard_prefix); }
+void RemoveDashboard() {
+    ObjectsDeleteAll(0,dashboard_prefix);
+    ArrayResize(dashboard_page_object_names,0);
+    ArrayResize(dashboard_page_object_tabs,0);
+    dashboard_track_page_objects=false;
+}
 
 //+------------------------------------------------------------------+
 //| Adaptive configuration, context and structured local data       |
@@ -1305,6 +1450,19 @@ bool AcceptMLPrediction(string body) {
     ExtractMLJsonNumber(body,"entry_zone_high",ml_entry_zone_high);
     ExtractMLJsonNumber(body,"entry_candle_low",ml_entry_candle_low);
     ExtractMLJsonNumber(body,"entry_candle_high",ml_entry_candle_high);
+    string timeframe_keys[6]={"h4","h1","m30","m15","m5","m1"};
+    for(int tf=0;tf<ArraySize(timeframe_keys);tf++) {
+        string key=timeframe_keys[tf];
+        ExtractMLJsonNumber(body,key+"_poi_low",ml_tf_poi_low[tf]);
+        ExtractMLJsonNumber(body,key+"_poi_high",ml_tf_poi_high[tf]);
+        ExtractMLJsonString(body,key+"_poi_direction",ml_tf_poi_direction[tf]);
+        if(ml_tf_poi_low[tf]<=0 || ml_tf_poi_high[tf]<ml_tf_poi_low[tf] ||
+           (ml_tf_poi_direction[tf]!="BUY" && ml_tf_poi_direction[tf]!="SELL")) {
+            ml_tf_poi_low[tf]=0;
+            ml_tf_poi_high[tf]=0;
+            ml_tf_poi_direction[tf]="NONE";
+        }
+    }
     if(!ExtractMLJsonString(body,"h4_signal",ml_h4_signal) ||
        !ExtractMLJsonString(body,"h1_signal",ml_h1_signal) ||
        !ExtractMLJsonString(body,"m30_signal",ml_m30_signal) ||
@@ -1363,14 +1521,23 @@ bool AcceptMLPrediction(string body) {
         (direction=="BUY" || direction=="SELL" || planned_direction=="BUY" || planned_direction=="SELL");
     string selected_mode=ml_recommended_mode;
     string selected_signal="WAIT";
+    bool range_scalp_confirmed=
+        ml_confirmation_status=="RANGE_SCALP_CONFIRMED" &&
+        ml_recommended_mode=="SCALP" && ml_h1_signal=="RANGE" &&
+        ml_trend_direction=="RANGE" && (signal=="BUY" || signal=="SELL") &&
+        ml_m1_signal==signal && ml_m5_signal==signal &&
+        ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low &&
+        StringFind(ml_entry_zone_source,"validated_ml_")==0;
     bool learned_setup_confirmed=
         ml_confirmation_status=="DIRECTION_CONFIRMED" ||
-        ml_confirmation_status=="REVERSAL_CONFIRMED";
+        ml_confirmation_status=="REVERSAL_CONFIRMED" || range_scalp_confirmed;
     bool server_setup_valid=(ml_recommended_mode=="SWING" || ml_recommended_mode=="SCALP") &&
         learned_setup_confirmed && (signal=="BUY" || signal=="SELL") &&
         direction==signal && planned_direction==signal &&
         MLTimeframesAlignedForMode(signal,ml_recommended_mode) &&
-        execution_atr>0 && risk_stop_atr>0 && risk_target_atr>0;
+        execution_atr>0 && risk_stop_atr>0 && risk_target_atr>0 &&
+        ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low &&
+        StringFind(ml_entry_zone_source,"validated_ml_")==0;
     if(runtime_operating_mode==NEXA_SWING) {
         selected_mode=server_setup_valid && ml_recommended_mode=="SWING"?"SWING":"WAIT";
         selected_signal=selected_mode=="SWING"?signal:"WAIT";
@@ -1412,15 +1579,6 @@ bool AcceptMLPrediction(string body) {
         (selected_signal=="BUY" || selected_signal=="SELL");
     if(selected_mode=="SCALP") {
         if(selected_signal=="BUY" || selected_signal=="SELL") {
-            bool buy_side=selected_signal=="BUY";
-            double fallback_low=buy_side?ml_potential_bullish_reversal_low:ml_potential_bearish_reversal_low;
-            double fallback_high=buy_side?ml_potential_bullish_reversal_high:ml_potential_bearish_reversal_high;
-            if(ml_entry_zone_low<=0 || ml_entry_zone_high<ml_entry_zone_low) {
-                ml_entry_zone_low=fallback_low;
-                ml_entry_zone_high=fallback_high;
-                ml_entry_price=(fallback_low>0 && fallback_high>=fallback_low)?(fallback_low+fallback_high)*0.5:0;
-                ml_entry_zone_source=buy_side?ml_bullish_reversal_source:ml_bearish_reversal_source;
-            }
             bool valid_scalp_zone=ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low;
             bool valid_scalp_candle=ml_entry_candle_low>0 && ml_entry_candle_high>=ml_entry_candle_low;
             ml_entry_triggered=valid_scalp_zone && valid_scalp_candle &&
@@ -1535,13 +1693,32 @@ string MLResponseHeaderValue(string response_headers,string header_name) {
 bool RequestMLPrediction() {
     if(!InpUseMLService || IsTesterRun()) return false;
     string base=MLServiceBaseUrl(); if(StringLen(base)<8) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"ML API base URL not set"); return false; }
-    if(StringLen(runtime_ml_api_key)==0) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"Missing MQL5/Files/NEXA_ML_API_KEY.txt"); return false; }
-    string body=BuildMLCandlePayload(); if(body=="") { SetMLLinkState(ML_LINK_NO_RESPONSE,0,"Fewer than 260 completed candles available on H4/H1/M30/M15/M5/M1"); return false; }
+    if(StringLen(runtime_ml_api_key)==0) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"Set InpMLApiKey or provide a build-time/local key"); return false; }
+    string body=BuildMLCandlePayload(); if(body=="") { SetMLLinkState(ML_LINK_NO_RESPONSE,0,"Fewer than 500 completed H4/H1 or 260 completed M30/M15/M5/M1 candles"); return false; }
     char request[]; char response[]; string response_headers=""; string headers=MLHeaders();
     StringToCharArray(body,request,0,StringLen(body),CP_UTF8); ResetLastError(); uint started=GetTickCount();
     int status=WebRequest("POST",base+"/api/ml/predict/consensus",headers,MathMax(500,runtime_ml_timeout_ms),request,response,response_headers);
     int error_code=GetLastError(); int elapsed=(int)(GetTickCount()-started);
-    if(status==-1) { SetMLLinkState(error_code==4014?ML_LINK_NOT_PERMITTED:(error_code==5202?ML_LINK_TIMEOUT:ML_LINK_UNREACHABLE),0,StringFormat("Request error %d; allow %s in MT5 Expert Advisor options",error_code,ML_RENDER_BASE_URL)); return false; }
+    if(status==-1) {
+        if(error_code==4014) {
+            SetMLLinkState(ML_LINK_NOT_PERMITTED,0,"Allow "+ML_RENDER_BASE_URL+" in MT5 Expert Advisor options");
+            return false;
+        }
+        if(error_code==5200) {
+            SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"Invalid ML service URL: "+ML_RENDER_BASE_URL);
+            return false;
+        }
+        if(error_code==5202 || elapsed>=MathMax(500,runtime_ml_timeout_ms)) {
+            SetMLLinkState(ML_LINK_TIMEOUT,0,StringFormat("No response within %d ms (MT5 error %d)",runtime_ml_timeout_ms,error_code));
+            return false;
+        }
+        SetMLLinkState(ML_LINK_UNREACHABLE,0,StringFormat("%s (MT5 error %d)",ML_RENDER_BASE_URL,error_code));
+        return false;
+    }
+    if(status==0) {
+        SetMLLinkState(ML_LINK_NO_RESPONSE,0,StringFormat("Empty server reply after %d ms",elapsed));
+        return false;
+    }
     if(status<200 || status>=300) {
         string response_body=CharArrayToString(response,0,MathMin(512,ArraySize(response)),CP_UTF8);
         StringReplace(response_body,"\r"," ");
@@ -1599,11 +1776,16 @@ void ClearMLPrediction(string reason) {
     ml_potential_bearish_reversal_low=0; ml_potential_bearish_reversal_high=0;
     ml_entry_direction="WAIT"; ml_planned_direction="WAIT"; ml_entry_status=reason; ml_entry_zone_source="unavailable";
     ml_poi_direction="NONE"; ml_setup_reason=reason; ml_setup_context="No current lower-timeframe setup context";
-    ml_poi_reason="No structural POI"; ml_trend_reason=reason;
+    ml_poi_reason="No validated ML POI"; ml_trend_reason=reason;
     ml_model_class="unknown"; ml_runner_up_class="unknown";
     ml_model_class_probability=0; ml_runner_up_probability=0;
     ml_entry_triggered=false; ml_entry_price=0; ml_entry_zone_low=0; ml_entry_zone_high=0;
     ml_entry_candle_low=0; ml_entry_candle_high=0;
+    for(int tf=0;tf<6;tf++) {
+        ml_tf_poi_low[tf]=0;
+        ml_tf_poi_high[tf]=0;
+        ml_tf_poi_direction[tf]="NONE";
+    }
     ml_breakout_up=0; ml_breakout_down=0;
     ml_bullish_reversal_source="unavailable"; ml_bearish_reversal_source="unavailable";
     ml_h1_candle_time=""; ml_m15_candle_time="";
@@ -1664,23 +1846,38 @@ int OnInit() {
     atr_handle=iATR(_Symbol,PERIOD_M15,14);
     if(atr_handle==INVALID_HANDLE) Print("[NEXA][ERROR] ATR handle failed: ",GetLastError());
     if(!runtime_license_valid) { runtime_trading_enabled=false; runtime_new_trades_enabled=false; }
-    runtime_ml_api_key=NEXA_ML_API_KEY;
+    runtime_ml_timeout_ms=(int)MathMax(500,MathMin(60000,InpMLTimeoutMs));
+    runtime_ml_check_seconds=(int)MathMax(1,MathMin(60,InpMLCheckSeconds));
+    runtime_ml_api_key=InpMLApiKey;
     StringTrimLeft(runtime_ml_api_key); StringTrimRight(runtime_ml_api_key);
+    if(runtime_ml_api_key!="") runtime_ml_key_source="EA Inputs";
+    else {
+        runtime_ml_api_key=NEXA_ML_API_KEY;
+        StringTrimLeft(runtime_ml_api_key); StringTrimRight(runtime_ml_api_key);
+        if(runtime_ml_api_key!="") runtime_ml_key_source="compiled EA";
+    }
     if(runtime_ml_api_key=="") {
         int keyfile=FileOpen("NEXA_ML_API_KEY.txt",FILE_READ|FILE_TXT|FILE_ANSI);
-        if(keyfile!=INVALID_HANDLE) { runtime_ml_api_key=FileReadString(keyfile); FileClose(keyfile); StringTrimLeft(runtime_ml_api_key); StringTrimRight(runtime_ml_api_key); }
+        if(keyfile!=INVALID_HANDLE) {
+            runtime_ml_api_key=FileReadString(keyfile);
+            FileClose(keyfile);
+            StringTrimLeft(runtime_ml_api_key);
+            StringTrimRight(runtime_ml_api_key);
+            if(runtime_ml_api_key!="") runtime_ml_key_source="terminal-local file";
+        }
     }
     ResetCounters(); RecoverOpenTrades(); InitializeTesterDataFiles();
     SetMLLinkState(IsTesterRun()?ML_LINK_DISABLED:ML_LINK_NOT_CONFIGURED,0,
         IsTesterRun()?"WebRequest unavailable in Strategy Tester":
-        runtime_ml_api_key==""?"Missing MQL5/Files/NEXA_ML_API_KEY.txt":"Awaiting prediction request");
+        runtime_ml_api_key==""?"ML key missing: set InpMLApiKey or NEXA_ML_API_KEY":"Awaiting prediction request");
     CreateDashboard();
     if(!EventSetMillisecondTimer(50)) { Print("[NEXA][ERROR] Dashboard timer failed: ",GetLastError()); return INIT_FAILED; }
     PrintRuntimeSettings("INITIALIZED");
     Print("[NEXA][LICENSE] ",runtime_license_status," | product=",LICENSE_PRODUCT_ID," | account=",runtime_licensed_account," | server ",LICENSE_API_BASE_URL);
     Print("[NEXA] Data files: ",DataFileName("decisions"),", ",DataFileName("outcomes"),", ",DataFileName("ml"));
-    Print("[NEXA] Dashboard refresh=",runtime_refresh_ms,"ms; synchronous ML timeout=",runtime_ml_timeout_ms,"ms");
-    if(runtime_ml_api_key=="") Print("[NEXA][ML] No build-time or local API credential supplied; protected endpoints may reject requests");
+    Print("[NEXA] Dashboard refresh=",runtime_refresh_ms,"ms; synchronous ML timeout=",runtime_ml_timeout_ms,"ms; poll=",runtime_ml_check_seconds,"s");
+    if(runtime_ml_api_key=="") Print("[NEXA][ML] No input, build-time, or local API credential supplied; set InpMLApiKey or NEXA_ML_API_KEY");
+    else Print("[NEXA][ML] API credential loaded from ",runtime_ml_key_source);
     return INIT_SUCCEEDED;
 }
 
@@ -1789,7 +1986,8 @@ bool ShouldLookForNewTrades() {
         if(runtime_decision_logs) Print("[NEXA][BLOCK] Opposite EA position open; no trade against ML direction ",ml_planned_direction);
         return false;
     }
-    if(!MLCurrentPriceInsideEntryZone()) {
+    bool scalp_add=IsScalpMode() && CountEAOpenPositions()>0;
+    if(!scalp_add && !MLCurrentPriceInsideEntryZone()) {
         if(runtime_decision_logs && ml_entry_triggered)
             Print("[NEXA][ML][ENTRY] candle touched zone but executable quote is outside it; waiting for a live zone touch");
         return false;
@@ -1833,8 +2031,11 @@ bool ActivateMLLiveZoneEntry() {
     if((ml_planned_direction!="BUY" && ml_planned_direction!="SELL") ||
        ml_prediction_direction!=ml_planned_direction || !MLTimeframesAligned(ml_planned_direction))
         return false;
+    bool range_scalp_confirmation=active_trading_mode=="SCALP" &&
+        ml_confirmation_status=="RANGE_SCALP_CONFIRMED" &&
+        ml_h1_signal=="RANGE" && ml_trend_direction=="RANGE";
     if(ml_confirmation_status!="DIRECTION_CONFIRMED" &&
-       ml_confirmation_status!="REVERSAL_CONFIRMED")
+       ml_confirmation_status!="REVERSAL_CONFIRMED" && !range_scalp_confirmation)
         return false;
     if(active_trading_mode=="SCALP" &&
        ml_prediction_confidence<MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence))
@@ -1880,7 +2081,8 @@ string ModeReadinessText() {
        ml_prediction_confidence<MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence))
         return StringFormat("PENDING  |  scalp confidence %.1f%% below %.0f%% minimum",
             ml_prediction_confidence,MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence));
-    if(!MLCurrentPriceInsideEntryZone()) {
+    bool scalp_add=active_trading_mode=="SCALP" && CountEAOpenPositions()>0;
+    if(!scalp_add && !MLCurrentPriceInsideEntryZone()) {
         string entry_wait=ml_entry_triggered?"candle touched; live quote outside zone":ml_entry_status;
         return "PENDING  |  ML "+entry_wait+" "+
             DoubleToString(ml_entry_zone_low,_Digits)+"-"+DoubleToString(ml_entry_zone_high,_Digits);
@@ -1908,7 +2110,7 @@ string ModeReadinessText() {
     if(!GridAddIsDue(ml_prediction_signal))
         return StringFormat("PENDING  |  waiting for %s ML add interval %.2f",
             ml_prediction_signal,ScalpGridSpacing(ml_prediction_signal));
-    return "READY  |  H1+M15 aligned; ATR spacing and exits set";
+    return "READY  |  H1+M1/M5 aligned; ATR spacing and exits set";
 }
 
 //+------------------------------------------------------------------+
@@ -1932,6 +2134,7 @@ void CheckForHighProbabilitySetups() {
     string side=ml_prediction_signal;
     if(side!="BUY" && side!="SELL") return;
     if(side!=ml_planned_direction || !MLTimeframesAligned(side)) return;
+    if(!MLCurrentPriceInsideEntryZone()) return;
     if((side=="BUY"&&!runtime_buy_enabled)||(side=="SELL"&&!runtime_sell_enabled)) return;
     pending_decision_id=NewDecisionId();
     StageDecisionContext(side,"ML_ONLY",ml_prediction_buy_probability,ml_prediction_sell_probability,0);
@@ -2180,7 +2383,7 @@ void ResetCounters() {
 //+------------------------------------------------------------------+
 void OnTimer() {
     uint now=GetTickCount();
-    if(now-dashboard_last_refresh>=(uint)runtime_refresh_ms) { dashboard_last_refresh=now; UpdateDashboard(); }
+    if(now-dashboard_last_refresh>=(uint)runtime_refresh_ms) { dashboard_last_refresh=now; UpdateDashboard(); SyncDashboardStateWithServer(); }
     UpdateCounters();
     static datetime last_heartbeat=0;
     if(TimeLocal()-last_heartbeat>=60) { last_heartbeat=TimeLocal(); WriteTelemetryHeartbeat(runtime_trading_enabled?"ACTIVE":"STOPPED"); }
@@ -2201,58 +2404,260 @@ double OnTester() {
 //+------------------------------------------------------------------+
 //| Dashboard interaction                                           |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Dashboard Hit-Testing Engine                                    |
+//| Maps screen click coordinates (450x540 base space) to actions    |
+//+------------------------------------------------------------------+
+string HitTestDashboard(int tab, int x, int y) {
+    // MinTop button
+    if(x >= 400 && x <= 440 && y >= 8 && y <= 38) return "MinTop";
+    // StatusPill / Top toggle
+    if(x >= 290 && x <= 395 && y >= 10 && y <= 36) return "StartTrading";
+    
+    // Tab Navigation row (y ~ 50 to 88)
+    if(y >= 50 && y <= 88) {
+        if(x >= 10  && x <= 72)  return "TAB0";
+        if(x >= 73  && x <= 134) return "TAB1";
+        if(x >= 135 && x <= 184) return "TAB2";
+        if(x >= 185 && x <= 238) return "TAB3";
+        if(x >= 239 && x <= 280) return "TAB4";
+        if(x >= 281 && x <= 330) return "TAB5";
+        if(x >= 331 && x <= 395) return "TAB6";
+    }
+
+    // Tab 0: Trade Tab
+    if(tab == 0) {
+        if(y >= 120 && y <= 162) {
+            if(x >= 14 && x <= 212)  return "StartTrading";
+            if(x >= 213 && x <= 436) return "StopTrading";
+        }
+        if(y >= 164 && y <= 194) {
+            if(x >= 14 && x <= 154)  return "NewTrades";
+            if(x >= 155 && x <= 294) return "Buy";
+            if(x >= 295 && x <= 436) return "Sell";
+        }
+        if(y >= 198 && y <= 230) {
+            if(x >= 14 && x <= 154)  return "LotMode0";
+            if(x >= 155 && x <= 294) return "LotMode1";
+            if(x >= 295 && x <= 436) return "LotMode2";
+        }
+        if(x >= 290 && x <= 436 && y >= 460 && y <= 498) return "RecheckLicense";
+    }
+    // Tab 1: Strategy Tab
+    else if(tab == 1) {
+        if(y >= 122 && y <= 162) {
+            if(x >= 14 && x <= 150)  return "ModeAuto";
+            if(x >= 152 && x <= 288) return "ModeSwing";
+            if(x >= 290 && x <= 426) return "ModeScalp";
+        }
+    }
+    // Tab 3: News & Sessions Tab
+    else if(tab == 3) {
+        if(y >= 124 && y <= 156) {
+            if(x >= 14 && x <= 212)  return "NewsFilter";
+            if(x >= 214 && x <= 252) return "NewsMinus";
+            if(x >= 253 && x <= 290) return "NewsPlus";
+        }
+        if(x >= 14 && x <= 212 && y >= 196 && y <= 228) return "SessionFilter";
+        if(y >= 228 && y <= 260) {
+            if(x >= 14 && x <= 150)  return "Asian";
+            if(x >= 152 && x <= 286) return "London";
+            if(x >= 288 && x <= 424) return "NewYork";
+        }
+        if(y >= 290 && y <= 318) {
+            if(x >= 14 && x <= 48)   return "StartHourMinus";
+            if(x >= 180 && x <= 214) return "StartHourPlus";
+            if(x >= 228 && x <= 262) return "EndHourMinus";
+            if(x >= 394 && x <= 428) return "EndHourPlus";
+        }
+    }
+    // Tab 4: AI Tab
+    else if(tab == 4) {
+        if(y >= 122 && y <= 164) {
+            if(x >= 14 && x <= 216)  return "StartML";
+            if(x >= 218 && x <= 436) return "StopML";
+        }
+        if(y >= 248 && y <= 280) {
+            if(x >= 14 && x <= 54)   return "ConfidenceMinus";
+            if(x >= 156 && x <= 196) return "ConfidencePlus";
+        }
+    }
+    // Tab 6: Settings Tab
+    else if(tab == 6) {
+        if(y >= 122 && y <= 154) {
+            if(x >= 14 && x <= 52)   return "ScaleMinus";
+            if(x >= 100 && x <= 138) return "ScalePlus";
+            if(x >= 150 && x <= 328) return "ResetPosition";
+            if(x >= 332 && x <= 436) return "Minimize";
+        }
+        if(y >= 246 && y <= 278 && x >= 14 && x <= 212) return "Trading";
+        if(y >= 276 && y <= 308) {
+            if(x >= 14 && x <= 212)  return "DebugLogs";
+            if(x >= 214 && x <= 412) return "DecisionLogs";
+        }
+    }
+
+    return "";
+}
+
+//+------------------------------------------------------------------+
+//| Dashboard Action Dispatcher                                     |
+//+------------------------------------------------------------------+
+void ProcessDashboardAction(string key) {
+    if(StringFind(key,"TAB")==0) {
+        int tab=(int)StringToInteger(StringSubstr(key,3));
+        if(tab!=dashboard_tab) {
+            SwitchDashboardTab(tab);
+            dashboard_last_refresh=GetTickCount();
+        }
+        return;
+    }
+    if(key=="MinTop"||key=="Minimize"){dashboard_minimized=!dashboard_minimized;RenderDashboard();return;}
+    if(key=="StartTrading"){
+        if(!RecheckWebsiteLicense()){Print("[NEXA][BLOCK] ",runtime_license_status);RenderDashboard();return;}
+        runtime_trading_enabled=true;runtime_new_trades_enabled=true;
+        Print("[NEXA][CONTROL] Trading started after website license verification");
+    }
+    else if(key=="StopTrading"){
+        runtime_new_trades_enabled=false;runtime_trading_enabled=false;
+        Print("[NEXA][CONTROL] Trading stopped; closing EA positions");
+        CloseAllEAPositions();
+    }
+    else if(key=="NewTrades")runtime_new_trades_enabled=!runtime_new_trades_enabled;
+    else if(key=="Buy")runtime_buy_enabled=!runtime_buy_enabled; 
+    else if(key=="Sell")runtime_sell_enabled=!runtime_sell_enabled;
+    else if(StringFind(key,"LotMode")==0){runtime_lot_mode=(int)StringToInteger(StringSubstr(key,7));Print("[NEXA][RISK] Lot sizing mode: ",LotModeText());}
+    else if(key=="MartMultMinus")runtime_martingale_multiplier=MathMax(1.1,runtime_martingale_multiplier-0.1); 
+    else if(key=="MartMultPlus")runtime_martingale_multiplier=MathMin(5.0,runtime_martingale_multiplier+0.1);
+    else if(key=="MartStepsMinus")runtime_martingale_max_steps=(int)MathMax(1,runtime_martingale_max_steps-1); 
+    else if(key=="MartStepsPlus")runtime_martingale_max_steps=(int)MathMin(10,runtime_martingale_max_steps+1);
+    else if(key=="RecheckLicense"){RecheckWebsiteLicense();Print("[NEXA][LICENSE] Recheck: ",runtime_license_status);}
+    else if(key=="ModeAuto")runtime_operating_mode=NEXA_AUTO; 
+    else if(key=="ModeSwing")runtime_operating_mode=NEXA_SWING; 
+    else if(key=="ModeScalp")runtime_operating_mode=NEXA_SCALP;
+    else if(key=="NewsFilter")runtime_use_news=!runtime_use_news; 
+    else if(key=="NewsMinus")runtime_news_minutes=MathMax(5,runtime_news_minutes-5); 
+    else if(key=="NewsPlus")runtime_news_minutes=MathMin(240,runtime_news_minutes+5);
+    else if(key=="SessionFilter")runtime_use_session=!runtime_use_session; 
+    else if(key=="Asian")runtime_trade_asian=!runtime_trade_asian; 
+    else if(key=="London")runtime_trade_london=!runtime_trade_london; 
+    else if(key=="NewYork")runtime_trade_new_york=!runtime_trade_new_york;
+    else if(key=="StartHourMinus")runtime_session_start=NormalizeHour(runtime_session_start-1); 
+    else if(key=="StartHourPlus")runtime_session_start=NormalizeHour(runtime_session_start+1); 
+    else if(key=="EndHourMinus")runtime_session_end=NormalizeHour(runtime_session_end-1); 
+    else if(key=="EndHourPlus")runtime_session_end=NormalizeHour(runtime_session_end+1);
+    else if(key=="StartML"){runtime_ml_enabled=true;Print("[NEXA][AI] NEXA ML activated; ML-only execution active");}
+    else if(key=="StopML"){runtime_ml_enabled=false;active_trading_mode="WAIT";ClearMLPrediction("NEXA ML paused; new entries disabled");Print("[NEXA][AI] NEXA ML paused; new entries disabled");}
+    else if(key=="ConfidenceMinus"){runtime_ml_execution_confidence=MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence-5.0);Print("[NEXA][ML] Execution confidence set to ",DoubleToString(runtime_ml_execution_confidence,0),"%");}
+    else if(key=="ConfidencePlus"){runtime_ml_execution_confidence=MathMin(100.0,runtime_ml_execution_confidence+5.0);Print("[NEXA][ML] Execution confidence set to ",DoubleToString(runtime_ml_execution_confidence,0),"%");}
+    else if(key=="ScaleMinus")dashboard_scale=MathMax(75,dashboard_scale-5); 
+    else if(key=="ScalePlus")dashboard_scale=MathMin(150,dashboard_scale+5);
+    else if(key=="ResetPosition"){dashboard_x=InpDashboardX;dashboard_y=InpDashboardY;}
+    else if(StringFind(key,"Theme")==0)dashboard_theme=(int)StringToInteger(StringSubstr(key,5));
+    else if(key=="DebugLogs")runtime_debug_logs=!runtime_debug_logs; 
+    else if(key=="DecisionLogs")runtime_decision_logs=!runtime_decision_logs;
+    else if(key=="Trading")runtime_trading_enabled=!runtime_trading_enabled;
+    else if(key=="DailyMinus")runtime_max_daily=(int)MathMax(1,runtime_max_daily-1); 
+    else if(key=="DailyPlus")runtime_max_daily=(int)MathMin(50,runtime_max_daily+1);
+    else if(key=="HourlyMinus")runtime_max_hourly=(int)MathMax(1,runtime_max_hourly-1); 
+    else if(key=="HourlyPlus")runtime_max_hourly=(int)MathMin(50,runtime_max_hourly+1);
+    else if(key=="PositionsMinus")runtime_max_positions=(int)MathMax(1,runtime_max_positions-1); 
+    else if(key=="PositionsPlus")runtime_max_positions=(int)MathMin(20,runtime_max_positions+1);
+    else if(key=="ScalpPositionsMinus")runtime_scalp_max_positions=(int)MathMax(1,runtime_scalp_max_positions-1); 
+    else if(key=="ScalpPositionsPlus")runtime_scalp_max_positions=(int)MathMin(20,runtime_scalp_max_positions+1);
+    else if(key=="IntervalMinus")runtime_min_trade_minutes=(int)MathMax(0,runtime_min_trade_minutes-1); 
+    else if(key=="IntervalPlus")runtime_min_trade_minutes=(int)MathMin(240,runtime_min_trade_minutes+1);
+    else if(key=="RefreshMinus")runtime_refresh_ms=(int)MathMax(100,runtime_refresh_ms-50); 
+    else if(key=="RefreshPlus")runtime_refresh_ms=(int)MathMin(2000,runtime_refresh_ms+50);
+    else if(key=="RiskMinus")runtime_risk_percentage=MathMax(0.1,runtime_risk_percentage-0.1); 
+    else if(key=="RiskPlus")runtime_risk_percentage=MathMin(10.0,runtime_risk_percentage+0.1);
+    else if(key=="LotMinus")runtime_fixed_lot=MathMax(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),runtime_fixed_lot-SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP)); 
+    else if(key=="LotPlus")runtime_fixed_lot=MathMin(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX),runtime_fixed_lot+SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP));
+    else if(key=="SpreadMinus")runtime_max_spread_pips=MathMax(0.1,runtime_max_spread_pips-0.1); 
+    else if(key=="SpreadPlus")runtime_max_spread_pips=MathMin(100.0,runtime_max_spread_pips+0.1);
+    else if(key=="OffsetMinus")runtime_broker_utc_offset=(int)MathMax(-23,runtime_broker_utc_offset-1); 
+    else if(key=="OffsetPlus")runtime_broker_utc_offset=(int)MathMin(23,runtime_broker_utc_offset+1);
+    else if(key=="MLPollMinus")runtime_ml_check_seconds=(int)MathMax(1,runtime_ml_check_seconds-1); 
+    else if(key=="MLPollPlus")runtime_ml_check_seconds=(int)MathMin(60,runtime_ml_check_seconds+1);
+    else if(key=="TimeoutMinus")runtime_ml_timeout_ms=(int)MathMax(500,runtime_ml_timeout_ms-250); 
+    else if(key=="TimeoutPlus")runtime_ml_timeout_ms=(int)MathMin(60000,runtime_ml_timeout_ms+250);
+    else if(key=="FreshnessMinus")runtime_prediction_max_age_seconds=(int)MathMax(5,runtime_prediction_max_age_seconds-5); 
+    else if(key=="FreshnessPlus")runtime_prediction_max_age_seconds=(int)MathMin(120,runtime_prediction_max_age_seconds+5);
+    else if(key=="SpreadFilter")runtime_spread_filter=!runtime_spread_filter;
+
+    Print("[NEXA][CONTROL] ",key," | lot mode=",LotModeText()," risk=",DoubleToString(runtime_risk_percentage,1),"% lot=",DoubleToString(runtime_fixed_lot,2)); 
+    RenderDashboard(); 
+    dashboard_last_refresh=GetTickCount();
+}
+
+//+------------------------------------------------------------------+
+//| Server Telemetry Bridge                                          |
+//| Transmits EA state to /api/dashboard/state on nexafunds backend  |
+//+------------------------------------------------------------------+
+void SyncDashboardStateWithServer() {
+    static uint last_sync=0;
+    if(GetTickCount()-last_sync < 10000) return;
+    last_sync=GetTickCount();
+
+    if(LICENSE_API_BASE_URL=="") return;
+    string url=LICENSE_API_BASE_URL+"/api/dashboard/state";
+    string json=StringFormat(
+        "{\"account\":%I64d,\"symbol\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"tab\":%d,\"trading_active\":%s,\"ml_status\":\"%s\"}",
+        (long)AccountInfoInteger(ACCOUNT_LOGIN),
+        _Symbol,
+        AccountInfoDouble(ACCOUNT_BALANCE),
+        AccountInfoDouble(ACCOUNT_EQUITY),
+        dashboard_tab,
+        runtime_trading_enabled ? "true" : "false",
+        MLLinkStateText()
+    );
+
+    char post_data[], result[];
+    StringToCharArray(json,post_data,0,StringLen(json),CP_UTF8);
+    string result_headers="";
+    string headers="Content-Type: application/json\r\nAccept: application/json\r\n";
+    WebRequest("POST",url,headers,3000,post_data,result,result_headers);
+}
+//+------------------------------------------------------------------+
+//| Dashboard Interaction Handler                                   |
+//+------------------------------------------------------------------+
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam) {
-    if(StringFind(sparam,dashboard_prefix)!=0)return;
-    //--- rounded-corner masks and decorative strips are cosmetic only
-    if(StringFind(sparam,dashboard_prefix+"RC_")==0 || StringFind(sparam,dashboard_prefix+"SBAR_")==0) return;
-    if(id==CHARTEVENT_OBJECT_DRAG && sparam==DashName("DragHandle")){
-        dashboard_x=(int)ObjectGetInteger(0,sparam,OBJPROP_XDISTANCE)-DS(1); dashboard_y=(int)ObjectGetInteger(0,sparam,OBJPROP_YDISTANCE)-DS(1);
-        Print("[NEXA][DASHBOARD] Moved to x=",dashboard_x," y=",dashboard_y); RenderDashboard(); return;
+    if(id==CHARTEVENT_OBJECT_DRAG && (sparam==DashName("DragHandle") || sparam==DashName("Canvas"))){
+        dashboard_x=(int)ObjectGetInteger(0,sparam,OBJPROP_XDISTANCE)-DS(1); 
+        dashboard_y=(int)ObjectGetInteger(0,sparam,OBJPROP_YDISTANCE)-DS(1);
+        Print("[NEXA][DASHBOARD] Moved to x=",dashboard_x," y=",dashboard_y); 
+        RenderDashboard(); 
+        return;
     }
     if(id==CHARTEVENT_OBJECT_CLICK && sparam==DashName("DragHandle")) {
         ObjectSetInteger(0,sparam,OBJPROP_SELECTED,true);
         return;
     }
-    if(id!=CHARTEVENT_OBJECT_CLICK)return; string key=StringSubstr(sparam,StringLen(dashboard_prefix));
-    if(StringFind(key,"TAB")==0){int tab=(int)StringToInteger(StringSubstr(key,3)); if(tab!=dashboard_tab){dashboard_tab=tab;RenderDashboard();dashboard_last_refresh=GetTickCount();} else ObjectSetInteger(0,sparam,OBJPROP_STATE,false); return;}
-    if(key=="MinTop"||key=="Minimize"){dashboard_minimized=!dashboard_minimized;RenderDashboard();return;}
-    if(key=="StartTrading"){if(!RecheckWebsiteLicense()){Print("[NEXA][BLOCK] ",runtime_license_status);RenderDashboard();return;}runtime_trading_enabled=true;runtime_new_trades_enabled=true;Print("[NEXA][CONTROL] Trading started after website license verification");}
-    else if(key=="StopTrading"){runtime_new_trades_enabled=false;runtime_trading_enabled=false;Print("[NEXA][CONTROL] Trading stopped; closing EA positions");CloseAllEAPositions();}
-    else if(key=="NewTrades")runtime_new_trades_enabled=!runtime_new_trades_enabled;
-    else if(key=="Buy")runtime_buy_enabled=!runtime_buy_enabled; else if(key=="Sell")runtime_sell_enabled=!runtime_sell_enabled;
-    else if(StringFind(key,"LotMode")==0){runtime_lot_mode=(int)StringToInteger(StringSubstr(key,7));Print("[NEXA][RISK] Lot sizing mode: ",LotModeText());}
-    else if(key=="MartMultMinus")runtime_martingale_multiplier=MathMax(1.1,runtime_martingale_multiplier-0.1); else if(key=="MartMultPlus")runtime_martingale_multiplier=MathMin(5.0,runtime_martingale_multiplier+0.1);
-    else if(key=="MartStepsMinus")runtime_martingale_max_steps=(int)MathMax(1,runtime_martingale_max_steps-1); else if(key=="MartStepsPlus")runtime_martingale_max_steps=(int)MathMin(10,runtime_martingale_max_steps+1);
-    else if(key=="RecheckLicense"){RecheckWebsiteLicense();Print("[NEXA][LICENSE] Recheck: ",runtime_license_status);}
-    else if(key=="ModeAuto")runtime_operating_mode=NEXA_AUTO; else if(key=="ModeSwing")runtime_operating_mode=NEXA_SWING; else if(key=="ModeScalp")runtime_operating_mode=NEXA_SCALP;
-    else if(key=="NewsFilter")runtime_use_news=!runtime_use_news; else if(key=="NewsMinus")runtime_news_minutes=MathMax(5,runtime_news_minutes-5); else if(key=="NewsPlus")runtime_news_minutes=MathMin(240,runtime_news_minutes+5);
-    else if(key=="SessionFilter")runtime_use_session=!runtime_use_session; else if(key=="Asian")runtime_trade_asian=!runtime_trade_asian; else if(key=="London")runtime_trade_london=!runtime_trade_london; else if(key=="NewYork")runtime_trade_new_york=!runtime_trade_new_york;
-    else if(key=="StartHourMinus")runtime_session_start=NormalizeHour(runtime_session_start-1); else if(key=="StartHourPlus")runtime_session_start=NormalizeHour(runtime_session_start+1); else if(key=="EndHourMinus")runtime_session_end=NormalizeHour(runtime_session_end-1); else if(key=="EndHourPlus")runtime_session_end=NormalizeHour(runtime_session_end+1);
-    else if(key=="StartML"){runtime_ml_enabled=true;Print("[NEXA][AI] NEXA ML activated; ML-only execution active");}
-    else if(key=="StopML"){runtime_ml_enabled=false;active_trading_mode="WAIT";ClearMLPrediction("NEXA ML paused; new entries disabled");Print("[NEXA][AI] NEXA ML paused; new entries disabled");}
-    else if(key=="ConfidenceMinus"){runtime_ml_execution_confidence=MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence-5.0);Print("[NEXA][ML] Execution confidence set to ",DoubleToString(runtime_ml_execution_confidence,0),"%");}
-    else if(key=="ConfidencePlus"){runtime_ml_execution_confidence=MathMin(100.0,runtime_ml_execution_confidence+5.0);Print("[NEXA][ML] Execution confidence set to ",DoubleToString(runtime_ml_execution_confidence,0),"%");}
-    else if(key=="ScaleMinus")dashboard_scale=MathMax(75,dashboard_scale-5); else if(key=="ScalePlus")dashboard_scale=MathMin(150,dashboard_scale+5);
-    else if(key=="ResetPosition"){dashboard_x=InpDashboardX;dashboard_y=InpDashboardY;}
-    else if(StringFind(key,"Theme")==0)dashboard_theme=(int)StringToInteger(StringSubstr(key,5));
-    else if(key=="DebugLogs")runtime_debug_logs=!runtime_debug_logs; else if(key=="DecisionLogs")runtime_decision_logs=!runtime_decision_logs;
-    else if(key=="Trading")runtime_trading_enabled=!runtime_trading_enabled;
-    else if(key=="DailyMinus")runtime_max_daily=(int)MathMax(1,runtime_max_daily-1); else if(key=="DailyPlus")runtime_max_daily=(int)MathMin(50,runtime_max_daily+1);
-    else if(key=="HourlyMinus")runtime_max_hourly=(int)MathMax(1,runtime_max_hourly-1); else if(key=="HourlyPlus")runtime_max_hourly=(int)MathMin(50,runtime_max_hourly+1);
-    else if(key=="PositionsMinus")runtime_max_positions=(int)MathMax(1,runtime_max_positions-1); else if(key=="PositionsPlus")runtime_max_positions=(int)MathMin(20,runtime_max_positions+1);
-    else if(key=="ScalpPositionsMinus")runtime_scalp_max_positions=(int)MathMax(1,runtime_scalp_max_positions-1); else if(key=="ScalpPositionsPlus")runtime_scalp_max_positions=(int)MathMin(20,runtime_scalp_max_positions+1);
-    else if(key=="IntervalMinus")runtime_min_trade_minutes=(int)MathMax(0,runtime_min_trade_minutes-1); else if(key=="IntervalPlus")runtime_min_trade_minutes=(int)MathMin(240,runtime_min_trade_minutes+1);
-    else if(key=="RefreshMinus")runtime_refresh_ms=(int)MathMax(100,runtime_refresh_ms-50); else if(key=="RefreshPlus")runtime_refresh_ms=(int)MathMin(2000,runtime_refresh_ms+50);
-    else if(key=="RiskMinus")runtime_risk_percentage=MathMax(0.1,runtime_risk_percentage-0.1); else if(key=="RiskPlus")runtime_risk_percentage=MathMin(10.0,runtime_risk_percentage+0.1);
-    else if(key=="LotMinus")runtime_fixed_lot=MathMax(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),runtime_fixed_lot-SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP)); else if(key=="LotPlus")runtime_fixed_lot=MathMin(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX),runtime_fixed_lot+SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP));
-    else if(key=="SpreadMinus")runtime_max_spread_pips=MathMax(0.1,runtime_max_spread_pips-0.1); else if(key=="SpreadPlus")runtime_max_spread_pips=MathMin(100.0,runtime_max_spread_pips+0.1);
-    else if(key=="OffsetMinus")runtime_broker_utc_offset=(int)MathMax(-23,runtime_broker_utc_offset-1); else if(key=="OffsetPlus")runtime_broker_utc_offset=(int)MathMin(23,runtime_broker_utc_offset+1);
-    else if(key=="MLPollMinus")runtime_ml_check_seconds=(int)MathMax(1,runtime_ml_check_seconds-1); else if(key=="MLPollPlus")runtime_ml_check_seconds=(int)MathMin(60,runtime_ml_check_seconds+1);
-    else if(key=="TimeoutMinus")runtime_ml_timeout_ms=(int)MathMax(500,runtime_ml_timeout_ms-250); else if(key=="TimeoutPlus")runtime_ml_timeout_ms=(int)MathMin(30000,runtime_ml_timeout_ms+250);
-    else if(key=="FreshnessMinus")runtime_prediction_max_age_seconds=(int)MathMax(5,runtime_prediction_max_age_seconds-5); else if(key=="FreshnessPlus")runtime_prediction_max_age_seconds=(int)MathMin(120,runtime_prediction_max_age_seconds+5);
-    else if(key=="SpreadFilter")runtime_spread_filter=!runtime_spread_filter;
-    ObjectSetInteger(0,sparam,OBJPROP_STATE,false);
-    Print("[NEXA][CONTROL] ",key," | lot mode=",LotModeText()," risk=",DoubleToString(runtime_risk_percentage,1),"% lot=",DoubleToString(runtime_fixed_lot,2)); RenderDashboard(); dashboard_last_refresh=GetTickCount();
+
+    if(id!=CHARTEVENT_OBJECT_CLICK) return;
+
+    string key = "";
+
+    // 1. Hit-Test via Click Coordinates if clicked on Canvas or Frame
+    if(sparam==DashName("Canvas") || sparam==DashName("Frame") || StringFind(sparam,dashboard_prefix)==0) {
+        double scale = DashboardScaleFactor() / DASHBOARD_WIDTH_FACTOR;
+        if(scale <= 0.01) scale = 1.0;
+        int rx = (int)MathRound(((double)lparam - (double)dashboard_x) / scale);
+        int ry = (int)MathRound(((double)dparam - (double)dashboard_y) / scale);
+
+        key = HitTestDashboard(dashboard_tab, rx, ry);
+    }
+
+    // 2. Direct named button click fallback
+    if(key == "" && StringFind(sparam, dashboard_prefix) == 0) {
+        if(StringFind(sparam, dashboard_prefix+"RC_") == 0 || StringFind(sparam, dashboard_prefix+"SBAR_") == 0) return;
+        key = StringSubstr(sparam, StringLen(dashboard_prefix));
+    }
+
+    if(key != "") {
+        ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
+        ProcessDashboardAction(key);
+    }
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result) {
