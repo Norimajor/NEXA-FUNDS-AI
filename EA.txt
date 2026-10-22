@@ -2715,6 +2715,10 @@ void WP_ParseHitmap(const string hitmap) {
 }
 
 void WP_UpdateTabButtons() {
+    if(ObjectFind(0,WP_BITMAP_OBJECT)>=0) {
+        web_panel_x=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE);
+        web_panel_y=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE);
+    }
     bool tab_visible[7]={false,false,false,false,false,false,false};
     for(int i=0;i<ArraySize(web_panel_actions);i++) {
         string action=web_panel_actions[i];
@@ -2947,6 +2951,15 @@ void WP_Refresh() {
 }
 
 void WP_OnTimer() {
+    if(ObjectFind(0,WP_BITMAP_OBJECT)>=0) {
+        int actual_x=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE);
+        int actual_y=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE);
+        if(actual_x!=web_panel_x || actual_y!=web_panel_y) {
+            web_panel_x=actual_x;
+            web_panel_y=actual_y;
+            WP_SetPosition();
+        }
+    }
     uint now=GetTickCount();
     if(web_panel_dragging) return;
     if(web_panel_next_refresh!=0 && (int)(now-web_panel_next_refresh)<0) return;
@@ -3044,8 +3057,8 @@ void WP_OnChartEvent(const int id,const long &lparam,const double &dparam,const 
         }
         ProcessDashboardAction(action);
         Print("[NEXA][PANEL] Click action: ",action);
-        web_panel_next_refresh=0;
-        WP_Refresh();
+        WP_UpdateTabButtons();
+        web_panel_next_refresh=GetTickCount()+100;
         return;
     }
     if(x>=0 && y>=0 && x<web_panel_width && y<web_panel_height)
@@ -3064,8 +3077,8 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
             string action="TAB"+IntegerToString(tab);
             ProcessDashboardAction(action);
             Print("[NEXA][PANEL] Navigation button clicked: ",WP_TAB_LABELS[tab]);
-            web_panel_next_refresh=0;
-            WP_Refresh();
+            WP_UpdateTabButtons();
+            web_panel_next_refresh=GetTickCount()+100;
         }
         return;
     }
@@ -3073,6 +3086,7 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
         web_panel_x=(int)MathMax(0,ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE));
         web_panel_y=(int)MathMax(0,ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE));
         WP_SetPosition();
+        WP_UpdateTabButtons();
         ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_SELECTED,false);
         Print("[NEXA][PANEL] Moved to x=",web_panel_x," y=",web_panel_y);
         return;
