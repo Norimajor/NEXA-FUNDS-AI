@@ -44,7 +44,7 @@ The `InpLicenseKey` input is checked online at `https://nexafunds-steel.vercel.a
 
 ### Remote HTML dashboard
 
-The EA uses the web dashboard as its only chart panel; the native chart-object dashboard is disabled. The bitmap panel supports Trade, Strategy, Info, News, AI, Logs, and Settings tabs. Trade and strategy controls send actions to the EA, and Settings changes the accent colour and panel size. Drag the bitmap panel on the chart to move it; Reset Position returns it to `InpDashboardPanelX` and `InpDashboardPanelY`.
+The EA uses the web dashboard as its only chart panel; the native chart-object dashboard is disabled. The bitmap panel supports Trade, Strategy, Info, News, AI, Logs, and Settings tabs. Trade and strategy controls send actions to the EA, and Settings changes the accent colour and panel size. Drag the top title bar (not the tabs) to move the panel; Reset Position returns it to `InpDashboardPanelX` and `InpDashboardPanelY`.
 
 Deploy the NexaFunds API with the `/api/mt5/panel.bmp` renderer and set its `MT5_API_KEY` and `PANEL_URL` environment variables (`PANEL_URL` must point to the frontend's `/ea-panel` page). Enter that same API key in `InpDashboardPanelApiKey`, keep `InpDashboardPanelUrl` pointed at the API renderer endpoint, and allow the API host in MT5 under Tools > Options > Expert Advisors > Allow WebRequest for listed URL. The panel defaults to chart position x=470, y=30. The remote renderer requires Puppeteer's Chromium runtime on the API host.
 
