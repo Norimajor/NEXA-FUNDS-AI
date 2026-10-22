@@ -207,6 +207,7 @@ string web_panel_actions[];
 int web_panel_hitboxes[][4];
 uint web_panel_last_success=0, web_panel_next_refresh=0, web_panel_retry_delay=1000;
 bool web_panel_image_loaded=false;
+int web_panel_rendered_tab=-1;
 bool web_panel_mouse_down=false, web_panel_drag_candidate=false, web_panel_dragging=false;
 int web_panel_drag_offset_x=0, web_panel_drag_offset_y=0;
 int web_panel_mouse_x=0, web_panel_mouse_y=0;
@@ -833,6 +834,10 @@ void SetDashboardTabButtonState(int tab,bool active) {
 }
 void SwitchDashboardTab(int tab) {
     if(tab<0 || tab>6 || tab==dashboard_tab) return;
+    if(!InpShowDashboard) {
+        dashboard_tab=tab;
+        return;
+    }
     int previous_tab=dashboard_tab;
     bool tab_already_built=DashboardTabHasObjects(tab);
     dashboard_tab=tab;
@@ -2742,9 +2747,9 @@ void WP_UpdateTabButtons() {
         ObjectSetInteger(0,name,OBJPROP_FONTSIZE,
             (int)MathMax(5,MathMin(12,MathRound(8.0*web_panel_width/365.0))));
         ObjectSetInteger(0,name,OBJPROP_BGCOLOR,
-            tab==dashboard_tab?DashAccent():DashPanel());
+            tab==web_panel_rendered_tab?DashAccent():DashPanel());
         ObjectSetInteger(0,name,OBJPROP_COLOR,
-            tab==dashboard_tab?DashOnAccent():DashText());
+            tab==web_panel_rendered_tab?DashOnAccent():DashText());
         ObjectSetInteger(0,name,OBJPROP_BORDER_COLOR,DashBorder());
         ObjectSetInteger(0,name,OBJPROP_SELECTABLE,true);
         ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
@@ -2856,6 +2861,7 @@ bool WP_Init() {
     web_panel_next_refresh=0;
     web_panel_retry_delay=1000;
     web_panel_image_loaded=false;
+    web_panel_rendered_tab=-1;
     ChartRedraw();
     return true;
 }
@@ -2918,6 +2924,17 @@ void WP_Refresh() {
         web_panel_retry_delay=(uint)MathMin(30000,web_panel_retry_delay*2);
         return;
     }
+    string rendered_tab_header=WP_HeaderValue(response_headers,"X-Panel-Tab");
+    if(rendered_tab_header=="") {
+        ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: renderer tab sync required");
+        web_panel_next_refresh=now+1000;
+        return;
+    }
+    if(rendered_tab_header!=IntegerToString(dashboard_tab)) {
+        ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: waiting for matching tab");
+        web_panel_next_refresh=now+100;
+        return;
+    }
     int offset=WP_ReadInt(response,10);
     int width=WP_ReadInt(response,18);
     int height=WP_ReadInt(response,22);
@@ -2957,6 +2974,7 @@ void WP_Refresh() {
     ObjectSetString(0,WP_BITMAP_OBJECT,OBJPROP_BMPFILE,WP_BITMAP_RESOURCE);
     web_panel_width=width;
     web_panel_height=height;
+    web_panel_rendered_tab=dashboard_tab;
     WP_ParseHitmap(WP_HeaderValue(response_headers,"X-Hitmap"));
     web_panel_last_success=now;
     web_panel_image_loaded=true;
