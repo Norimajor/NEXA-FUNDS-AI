@@ -209,6 +209,7 @@ uint web_panel_last_success=0, web_panel_next_refresh=0, web_panel_retry_delay=1
 bool web_panel_image_loaded=false;
 bool web_panel_mouse_down=false, web_panel_drag_candidate=false, web_panel_dragging=false;
 int web_panel_drag_offset_x=0, web_panel_drag_offset_y=0;
+int web_panel_mouse_x=0, web_panel_mouse_y=0;
 int web_panel_suppress_click_x=0, web_panel_suppress_click_y=0;
 uint web_panel_suppress_click_until=0;
 
@@ -2899,6 +2900,8 @@ void WP_OnMouseMove(const long &lparam,const double &dparam,const string &sparam
     int mouse_state=(int)StringToInteger(sparam);
     bool left_pressed=(mouse_state&1)!=0;
     int mouse_x=(int)lparam, mouse_y=(int)dparam;
+    web_panel_mouse_x=mouse_x;
+    web_panel_mouse_y=mouse_y;
     if(!left_pressed) {
         if(web_panel_mouse_down && web_panel_dragging) {
             web_panel_suppress_click_until=GetTickCount()+500;
@@ -2964,14 +2967,14 @@ void WP_OnChartEvent(const int id,const long &lparam,const double &dparam,const 
     if(web_panel_suppress_click_until!=0) {
         if((int)(web_panel_suppress_click_until-GetTickCount())>=0) {
             web_panel_suppress_click_until=0;
-            if(MathAbs((int)lparam-web_panel_suppress_click_x)<=8 &&
-               MathAbs((int)dparam-web_panel_suppress_click_y)<=8) return;
+            if(MathAbs(web_panel_mouse_x-web_panel_suppress_click_x)<=8 &&
+               MathAbs(web_panel_mouse_y-web_panel_suppress_click_y)<=8) return;
         } else {
             web_panel_suppress_click_until=0;
         }
     }
-    int x=(int)lparam-web_panel_x;
-    int y=(int)dparam-web_panel_y;
+    int x=web_panel_mouse_x-web_panel_x;
+    int y=web_panel_mouse_y-web_panel_y;
     for(int i=0;i<ArraySize(web_panel_actions);i++) {
         if(web_panel_actions[i]=="" || x<web_panel_hitboxes[i][0] ||
            x>=web_panel_hitboxes[i][0]+web_panel_hitboxes[i][2] ||
