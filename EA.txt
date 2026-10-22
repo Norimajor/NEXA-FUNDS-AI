@@ -312,6 +312,7 @@ void WP_Refresh();
 void WP_OnTimer();
 void WP_OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam);
 void WP_SetPosition();
+void WP_UpdateTabButtons();
 void WP_OnMouseMove(const long &lparam,const double &dparam,const string &sparam);
 string WP_BuildStateJson();
 void DrawMLPointOfInterest();
@@ -2667,6 +2668,8 @@ void SyncDashboardStateWithServer() {
 #define WP_BITMAP_OBJECT "NEXA_REMOTE_PANEL"
 #define WP_STATUS_OBJECT "NEXA_REMOTE_PANEL_STATUS"
 #define WP_BITMAP_RESOURCE "::nexa_remote_panel"
+#define WP_TAB_OBJECT_PREFIX "NEXA_REMOTE_TAB_"
+string WP_TAB_LABELS[7]={"TRADE","STRATEGY","INFO","NEWS","AI","LOGS","SETTINGS"};
 
 int WP_ReadInt(const char &buffer[],int offset) {
     return (int)((uint)(uchar)buffer[offset] |
@@ -2708,6 +2711,48 @@ void WP_ParseHitmap(const string hitmap) {
         for(int field=0;field<4;field++)
             web_panel_hitboxes[i][field]=(int)StringToInteger(fields[field+1]);
     }
+    WP_UpdateTabButtons();
+}
+
+void WP_UpdateTabButtons() {
+    bool tab_visible[7]={false,false,false,false,false,false,false};
+    for(int i=0;i<ArraySize(web_panel_actions);i++) {
+        string action=web_panel_actions[i];
+        if(StringFind(action,"TAB")!=0) continue;
+        int tab=(int)StringToInteger(StringSubstr(action,3));
+        if(tab<0 || tab>=ArraySize(WP_TAB_LABELS)) continue;
+        tab_visible[tab]=true;
+        string name=WP_TAB_OBJECT_PREFIX+IntegerToString(tab);
+        if(ObjectFind(0,name)<0 && !ObjectCreate(0,name,OBJ_BUTTON,0,0,0)) {
+            Print("[NEXA][PANEL] Navigation button creation failed: ",GetLastError());
+            continue;
+        }
+        ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+        ObjectSetInteger(0,name,OBJPROP_XDISTANCE,web_panel_x+web_panel_hitboxes[i][0]);
+        ObjectSetInteger(0,name,OBJPROP_YDISTANCE,web_panel_y+web_panel_hitboxes[i][1]);
+        ObjectSetInteger(0,name,OBJPROP_XSIZE,web_panel_hitboxes[i][2]);
+        ObjectSetInteger(0,name,OBJPROP_YSIZE,web_panel_hitboxes[i][3]);
+        ObjectSetString(0,name,OBJPROP_TEXT,WP_TAB_LABELS[tab]);
+        ObjectSetString(0,name,OBJPROP_FONT,"Arial");
+        ObjectSetInteger(0,name,OBJPROP_FONTSIZE,
+            (int)MathMax(5,MathMin(12,MathRound(8.0*web_panel_width/365.0))));
+        ObjectSetInteger(0,name,OBJPROP_BGCOLOR,
+            tab==dashboard_tab?DashAccent():DashPanel());
+        ObjectSetInteger(0,name,OBJPROP_COLOR,
+            tab==dashboard_tab?DashOnAccent():DashText());
+        ObjectSetInteger(0,name,OBJPROP_BORDER_COLOR,DashBorder());
+        ObjectSetInteger(0,name,OBJPROP_SELECTABLE,true);
+        ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+        ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+        ObjectSetInteger(0,name,OBJPROP_BACK,false);
+        ObjectSetInteger(0,name,OBJPROP_ZORDER,2000);
+        ObjectSetInteger(0,name,OBJPROP_STATE,false);
+    }
+    for(int tab=0;tab<ArraySize(WP_TAB_LABELS);tab++) {
+        string name=WP_TAB_OBJECT_PREFIX+IntegerToString(tab);
+        if(!tab_visible[tab] && ObjectFind(0,name)>=0) ObjectDelete(0,name);
+    }
+    ChartRedraw();
 }
 
 string WP_BuildStateJson() {
@@ -2791,6 +2836,16 @@ void WP_SetPosition() {
         ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE,web_panel_x);
         ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE,web_panel_y);
     }
+    for(int tab=0;tab<ArraySize(WP_TAB_LABELS);tab++) {
+        string name=WP_TAB_OBJECT_PREFIX+IntegerToString(tab);
+        int action_index=0;
+        while(action_index<ArraySize(web_panel_actions) &&
+              web_panel_actions[action_index]!="TAB"+IntegerToString(tab))
+            action_index++;
+        if(action_index>=ArraySize(web_panel_actions) || ObjectFind(0,name)<0) continue;
+        ObjectSetInteger(0,name,OBJPROP_XDISTANCE,web_panel_x+web_panel_hitboxes[action_index][0]);
+        ObjectSetInteger(0,name,OBJPROP_YDISTANCE,web_panel_y+web_panel_hitboxes[action_index][1]);
+    }
     if(ObjectFind(0,WP_STATUS_OBJECT)>=0) {
         ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_XDISTANCE,web_panel_x+8);
         ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_YDISTANCE,web_panel_y+8);
@@ -2801,6 +2856,8 @@ void WP_SetPosition() {
 void WP_Deinit() {
     ObjectDelete(0,WP_BITMAP_OBJECT);
     ObjectDelete(0,WP_STATUS_OBJECT);
+    for(int tab=0;tab<ArraySize(WP_TAB_LABELS);tab++)
+        ObjectDelete(0,WP_TAB_OBJECT_PREFIX+IntegerToString(tab));
     ResourceFree(WP_BITMAP_RESOURCE);
 }
 
@@ -3000,6 +3057,18 @@ void WP_OnChartEvent(const int id,const long &lparam,const double &dparam,const 
 //| Dashboard Interaction Handler                                   |
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam) {
+    if(id==CHARTEVENT_OBJECT_CLICK && StringFind(sparam,WP_TAB_OBJECT_PREFIX)==0) {
+        int tab=(int)StringToInteger(StringSubstr(sparam,StringLen(WP_TAB_OBJECT_PREFIX)));
+        ObjectSetInteger(0,sparam,OBJPROP_STATE,false);
+        if(tab>=0 && tab<ArraySize(WP_TAB_LABELS)) {
+            string action="TAB"+IntegerToString(tab);
+            ProcessDashboardAction(action);
+            Print("[NEXA][PANEL] Navigation button clicked: ",WP_TAB_LABELS[tab]);
+            web_panel_next_refresh=0;
+            WP_Refresh();
+        }
+        return;
+    }
     if(id==CHARTEVENT_OBJECT_DRAG && sparam==WP_BITMAP_OBJECT) {
         web_panel_x=(int)MathMax(0,ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE));
         web_panel_y=(int)MathMax(0,ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE));
