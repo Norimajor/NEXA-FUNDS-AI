@@ -312,6 +312,7 @@ void WP_Refresh();
 void WP_OnTimer();
 void WP_OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam);
 void WP_SetPosition();
+void WP_AlignTabButtons();
 void WP_UpdateTabButtons();
 void WP_OnMouseMove(const long &lparam,const double &dparam,const string &sparam);
 string WP_BuildStateJson();
@@ -2669,6 +2670,8 @@ void SyncDashboardStateWithServer() {
 #define WP_STATUS_OBJECT "NEXA_REMOTE_PANEL_STATUS"
 #define WP_BITMAP_RESOURCE "::nexa_remote_panel"
 #define WP_TAB_OBJECT_PREFIX "NEXA_REMOTE_TAB_"
+#define WP_REFRESH_INTERVAL_MS 500
+#define WP_CLICK_REFRESH_DELAY_MS 50
 string WP_TAB_LABELS[7]={"TRADE","STRATEGY","INFO","NEWS","AI","LOGS","SETTINGS"};
 
 int WP_ReadInt(const char &buffer[],int offset) {
@@ -2732,8 +2735,6 @@ void WP_UpdateTabButtons() {
             continue;
         }
         ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-        ObjectSetInteger(0,name,OBJPROP_XDISTANCE,web_panel_x+web_panel_hitboxes[i][0]);
-        ObjectSetInteger(0,name,OBJPROP_YDISTANCE,web_panel_y+web_panel_hitboxes[i][1]);
         ObjectSetInteger(0,name,OBJPROP_XSIZE,web_panel_hitboxes[i][2]);
         ObjectSetInteger(0,name,OBJPROP_YSIZE,web_panel_hitboxes[i][3]);
         ObjectSetString(0,name,OBJPROP_TEXT,WP_TAB_LABELS[tab]);
@@ -2756,7 +2757,31 @@ void WP_UpdateTabButtons() {
         string name=WP_TAB_OBJECT_PREFIX+IntegerToString(tab);
         if(!tab_visible[tab] && ObjectFind(0,name)>=0) ObjectDelete(0,name);
     }
-    ChartRedraw();
+    WP_AlignTabButtons();
+}
+
+void WP_AlignTabButtons() {
+    bool changed=false;
+    for(int tab=0;tab<ArraySize(WP_TAB_LABELS);tab++) {
+        string name=WP_TAB_OBJECT_PREFIX+IntegerToString(tab);
+        if(ObjectFind(0,name)<0) continue;
+        int action_index=0;
+        while(action_index<ArraySize(web_panel_actions) &&
+              web_panel_actions[action_index]!="TAB"+IntegerToString(tab))
+            action_index++;
+        if(action_index>=ArraySize(web_panel_actions)) continue;
+        int target_x=web_panel_x+web_panel_hitboxes[action_index][0];
+        int target_y=web_panel_y+web_panel_hitboxes[action_index][1];
+        if((int)ObjectGetInteger(0,name,OBJPROP_XDISTANCE)!=target_x) {
+            ObjectSetInteger(0,name,OBJPROP_XDISTANCE,target_x);
+            changed=true;
+        }
+        if((int)ObjectGetInteger(0,name,OBJPROP_YDISTANCE)!=target_y) {
+            ObjectSetInteger(0,name,OBJPROP_YDISTANCE,target_y);
+            changed=true;
+        }
+    }
+    if(changed) ChartRedraw();
 }
 
 string WP_BuildStateJson() {
@@ -2840,16 +2865,7 @@ void WP_SetPosition() {
         ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE,web_panel_x);
         ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE,web_panel_y);
     }
-    for(int tab=0;tab<ArraySize(WP_TAB_LABELS);tab++) {
-        string name=WP_TAB_OBJECT_PREFIX+IntegerToString(tab);
-        int action_index=0;
-        while(action_index<ArraySize(web_panel_actions) &&
-              web_panel_actions[action_index]!="TAB"+IntegerToString(tab))
-            action_index++;
-        if(action_index>=ArraySize(web_panel_actions) || ObjectFind(0,name)<0) continue;
-        ObjectSetInteger(0,name,OBJPROP_XDISTANCE,web_panel_x+web_panel_hitboxes[action_index][0]);
-        ObjectSetInteger(0,name,OBJPROP_YDISTANCE,web_panel_y+web_panel_hitboxes[action_index][1]);
-    }
+    WP_AlignTabButtons();
     if(ObjectFind(0,WP_STATUS_OBJECT)>=0) {
         ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_XDISTANCE,web_panel_x+8);
         ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_YDISTANCE,web_panel_y+8);
@@ -2945,7 +2961,7 @@ void WP_Refresh() {
     web_panel_last_success=now;
     web_panel_image_loaded=true;
     web_panel_retry_delay=1000;
-    web_panel_next_refresh=now+1000;
+    web_panel_next_refresh=now+WP_REFRESH_INTERVAL_MS;
     ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"");
     ChartRedraw();
 }
@@ -2960,6 +2976,7 @@ void WP_OnTimer() {
             WP_SetPosition();
         }
     }
+    WP_AlignTabButtons();
     uint now=GetTickCount();
     if(web_panel_dragging) return;
     if(web_panel_next_refresh!=0 && (int)(now-web_panel_next_refresh)<0) return;
@@ -3058,7 +3075,7 @@ void WP_OnChartEvent(const int id,const long &lparam,const double &dparam,const 
         ProcessDashboardAction(action);
         Print("[NEXA][PANEL] Click action: ",action);
         WP_UpdateTabButtons();
-        web_panel_next_refresh=GetTickCount()+100;
+        web_panel_next_refresh=GetTickCount()+WP_CLICK_REFRESH_DELAY_MS;
         return;
     }
     if(x>=0 && y>=0 && x<web_panel_width && y<web_panel_height)
@@ -3078,7 +3095,7 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
             ProcessDashboardAction(action);
             Print("[NEXA][PANEL] Navigation button clicked: ",WP_TAB_LABELS[tab]);
             WP_UpdateTabButtons();
-            web_panel_next_refresh=GetTickCount()+100;
+            web_panel_next_refresh=GetTickCount()+WP_CLICK_REFRESH_DELAY_MS;
         }
         return;
     }
