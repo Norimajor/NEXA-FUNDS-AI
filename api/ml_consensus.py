@@ -412,6 +412,26 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
         and candle_low <= zone_high
         and candle_high >= zone_low
     )
+    scalp_plan = execution_plans.get("M1", {})
+    swing_plan = execution_plans.get("M15", {})
+    scalp_zone_valid = (
+        h1_trend_usable
+        and scalp_signal == trend
+        and scalp_plan.get("tradable")
+        and scalp_plan.get("direction") == trend
+        and float(scalp_plan.get("entry_zone_low") or 0.0) > 0
+        and float(scalp_plan.get("entry_zone_high") or 0.0)
+        >= float(scalp_plan.get("entry_zone_low") or 0.0)
+    )
+    swing_zone_valid = (
+        h1_trend_usable
+        and swing_signal == trend
+        and swing_plan.get("tradable")
+        and swing_plan.get("direction") == trend
+        and float(swing_plan.get("entry_zone_low") or 0.0) > 0
+        and float(swing_plan.get("entry_zone_high") or 0.0)
+        >= float(swing_plan.get("entry_zone_low") or 0.0)
+    )
     stop_atr = float(selected_plan.get("stop_atr") or 0.0)
     target_atr = float(selected_plan.get("target_atr") or 0.0)
     atr = float(entry_result.get("atr") or 0.0)
@@ -524,6 +544,22 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
             "entry_zone_source",
             f"validated_ml_{mode.lower()}_execution" if valid_zone else "unavailable",
         ),
+        "scalp_poi_direction": trend if scalp_zone_valid else "NONE",
+        "scalp_poi_low": float(scalp_plan.get("entry_zone_low") or 0.0) if scalp_zone_valid else 0.0,
+        "scalp_poi_high": float(scalp_plan.get("entry_zone_high") or 0.0) if scalp_zone_valid else 0.0,
+        "scalp_poi_source": scalp_plan.get("entry_zone_source", "unavailable") if scalp_zone_valid else "unavailable",
+        "scalp_poi_confidence": scalp_confidence if scalp_zone_valid else 0.0,
+        "scalp_stop_atr": float(scalp_plan.get("stop_atr") or 0.0) if scalp_zone_valid else 0.0,
+        "scalp_target_atr": float(scalp_plan.get("target_atr") or 0.0) if scalp_zone_valid else 0.0,
+        "scalp_atr": float(analyses["M1"].get("atr") or 0.0) if scalp_zone_valid else 0.0,
+        "swing_poi_direction": trend if swing_zone_valid else "NONE",
+        "swing_poi_low": float(swing_plan.get("entry_zone_low") or 0.0) if swing_zone_valid else 0.0,
+        "swing_poi_high": float(swing_plan.get("entry_zone_high") or 0.0) if swing_zone_valid else 0.0,
+        "swing_poi_source": swing_plan.get("entry_zone_source", "unavailable") if swing_zone_valid else "unavailable",
+        "swing_poi_confidence": swing_confidence if swing_zone_valid else 0.0,
+        "swing_stop_atr": float(swing_plan.get("stop_atr") or 0.0) if swing_zone_valid else 0.0,
+        "swing_target_atr": float(swing_plan.get("target_atr") or 0.0) if swing_zone_valid else 0.0,
+        "swing_atr": float(analyses["M15"].get("atr") or 0.0) if swing_zone_valid else 0.0,
         "stop_loss": float(selected_plan.get("stop_loss") or 0.0) if valid_zone else 0.0,
         "take_profit": float(selected_plan.get("take_profit") or 0.0) if valid_zone else 0.0,
         "execution_confidence": float(selected_plan.get("confidence") or 0.0),

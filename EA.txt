@@ -41,7 +41,7 @@ ENUM_BASE_CORNER InpDashboardCorner=CORNER_LEFT_UPPER;
 const int InpDashboardX=16, InpDashboardY=24;
 const string ML_RENDER_BASE_URL="https://nexa-funds-ai.onrender.com";
 int runtime_ml_timeout_ms=60000, runtime_ml_check_seconds=5, runtime_prediction_max_age_seconds=30;
-int runtime_refresh_ms=100, runtime_max_daily=40, runtime_max_hourly=10;
+int runtime_refresh_ms=50, runtime_max_daily=40, runtime_max_hourly=10;
 int runtime_min_trade_minutes=2, runtime_max_positions=2, runtime_scalp_max_positions=20;
 bool runtime_spread_filter=false;
 double runtime_max_spread_pips=3.0;
@@ -181,6 +181,12 @@ double ml_potential_bullish_reversal_low=0, ml_potential_bullish_reversal_high=0
 double ml_potential_bearish_reversal_low=0, ml_potential_bearish_reversal_high=0;
 double ml_entry_price=0, ml_entry_zone_low=0, ml_entry_zone_high=0;
 double ml_entry_candle_low=0, ml_entry_candle_high=0;
+string ml_scalp_poi_direction="NONE", ml_scalp_poi_source="unavailable";
+string ml_swing_poi_direction="NONE", ml_swing_poi_source="unavailable";
+double ml_scalp_poi_low=0, ml_scalp_poi_high=0, ml_scalp_poi_confidence=0;
+double ml_scalp_stop_atr=0, ml_scalp_target_atr=0, ml_scalp_atr=0;
+double ml_swing_poi_low=0, ml_swing_poi_high=0, ml_swing_poi_confidence=0;
+double ml_swing_stop_atr=0, ml_swing_target_atr=0, ml_swing_atr=0;
 double ml_tf_demand_low[6], ml_tf_demand_high[6], ml_tf_supply_low[6], ml_tf_supply_high[6];
 double ml_model_class_probability=0, ml_runner_up_probability=0;
 double ml_breakout_up=0, ml_breakout_down=0;
@@ -291,6 +297,7 @@ void RecoverOpenTrades();
 void RenderDashboard();
 void DrawMLPointOfInterest();
 void RemoveMLPointOfInterest();
+bool SelectTouchedMLExecutionZone();
 void CloseAllEAPositions();
 bool IsNewsBlocked();
 double ScalpPipSize();
@@ -720,6 +727,10 @@ void RemoveMLContextZones() {
     ObjectDelete(0,ml_poi_prefix+"BULL_LABEL");
     ObjectDelete(0,ml_poi_prefix+"BEAR_ZONE");
     ObjectDelete(0,ml_poi_prefix+"BEAR_LABEL");
+    ObjectDelete(0,ml_poi_prefix+"SCALP_ZONE");
+    ObjectDelete(0,ml_poi_prefix+"SCALP_LABEL");
+    ObjectDelete(0,ml_poi_prefix+"SWING_ZONE");
+    ObjectDelete(0,ml_poi_prefix+"SWING_LABEL");
     string timeframes[6]={"H4","H1","M30","M15","M5","M1"};
     for(int i=0;i<ArraySize(timeframes);i++) {
         string key="TF_"+timeframes[i]+"_";
@@ -775,29 +786,33 @@ void DrawMLPointOfInterest() {
     int seconds=MathMax(1,PeriodSeconds(_Period));
     datetime left=now-seconds*20;
     datetime right=now+seconds*6;
-    string entry_direction=ml_poi_direction;
-    bool valid_entry=(entry_direction=="BUY" || entry_direction=="SELL") &&
-        entry_direction==ml_h1_signal && entry_direction==ml_trend_direction &&
-        StringFind(ml_entry_zone_source,"validated_ml_")==0 &&
-        ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low;
-    color poi_color=entry_direction=="BUY"?DashGreen():DashRed();
-    if(valid_entry) {
-        DrawMLPriceZone("","NEXA ML ENTRY "+entry_direction+" | "+ml_entry_zone_source,
-            ml_entry_zone_low,ml_entry_zone_high,poi_color,left,right);
-    } else {
-        ObjectDelete(0,ml_poi_prefix+"ZONE");
-        ObjectDelete(0,ml_poi_prefix+"LABEL");
+    bool h1_directional=(ml_h1_signal=="BUY" || ml_h1_signal=="SELL") &&
+        ml_h1_signal==ml_trend_direction;
+    bool valid_scalp=h1_directional && ml_scalp_poi_direction==ml_h1_signal &&
+        ml_scalp_poi_source=="validated_ml_scalp_execution" &&
+        ml_scalp_poi_low>0 && ml_scalp_poi_high>=ml_scalp_poi_low;
+    bool valid_swing=h1_directional && ml_swing_poi_direction==ml_h1_signal &&
+        ml_swing_poi_source=="validated_ml_swing_execution" &&
+        ml_swing_poi_low>0 && ml_swing_poi_high>=ml_swing_poi_low;
+    string zone_type=ml_h1_signal=="BUY"?"DEMAND":"SUPPLY";
+    color poi_color=ml_h1_signal=="BUY"?DashGreen():DashRed();
+    if(valid_scalp)
+        DrawMLPriceZone("SCALP_","NEXA ML SCALP "+zone_type+" "+ml_h1_signal,
+            ml_scalp_poi_low,ml_scalp_poi_high,poi_color,left,right);
+    else {
+        ObjectDelete(0,ml_poi_prefix+"SCALP_ZONE");
+        ObjectDelete(0,ml_poi_prefix+"SCALP_LABEL");
     }
-    string mid=ml_poi_prefix+"MID";
-    if(valid_entry) {
-        double entry_level=ml_entry_price>0?ml_entry_price:(ml_entry_zone_low+ml_entry_zone_high)*0.5;
-        if(ObjectFind(0,mid)<0) ObjectCreate(0,mid,OBJ_HLINE,0,0,entry_level);
-        ObjectSetDouble(0,mid,OBJPROP_PRICE,entry_level);
-        ObjectSetInteger(0,mid,OBJPROP_COLOR,poi_color);
-        ObjectSetInteger(0,mid,OBJPROP_STYLE,STYLE_DOT);
-        ObjectSetInteger(0,mid,OBJPROP_SELECTABLE,false);
-        ObjectSetInteger(0,mid,OBJPROP_HIDDEN,true);
-    } else ObjectDelete(0,mid);
+    if(valid_swing)
+        DrawMLPriceZone("SWING_","NEXA ML SWING "+zone_type+" "+ml_h1_signal,
+            ml_swing_poi_low,ml_swing_poi_high,poi_color,left,right);
+    else {
+        ObjectDelete(0,ml_poi_prefix+"SWING_ZONE");
+        ObjectDelete(0,ml_poi_prefix+"SWING_LABEL");
+    }
+    ObjectDelete(0,ml_poi_prefix+"ZONE");
+    ObjectDelete(0,ml_poi_prefix+"LABEL");
+    ObjectDelete(0,ml_poi_prefix+"MID");
     ChartRedraw();
 }
 void DrawAITab() {
@@ -1588,6 +1603,34 @@ bool AcceptMLPrediction(string body) {
     ExtractMLJsonNumber(body,"entry_zone_high",ml_entry_zone_high);
     ExtractMLJsonNumber(body,"entry_candle_low",ml_entry_candle_low);
     ExtractMLJsonNumber(body,"entry_candle_high",ml_entry_candle_high);
+    ExtractMLJsonString(body,"scalp_poi_direction",ml_scalp_poi_direction);
+    ExtractMLJsonString(body,"scalp_poi_source",ml_scalp_poi_source);
+    ExtractMLJsonNumber(body,"scalp_poi_low",ml_scalp_poi_low);
+    ExtractMLJsonNumber(body,"scalp_poi_high",ml_scalp_poi_high);
+    ExtractMLJsonNumber(body,"scalp_poi_confidence",ml_scalp_poi_confidence);
+    ExtractMLJsonNumber(body,"scalp_stop_atr",ml_scalp_stop_atr);
+    ExtractMLJsonNumber(body,"scalp_target_atr",ml_scalp_target_atr);
+    ExtractMLJsonNumber(body,"scalp_atr",ml_scalp_atr);
+    ExtractMLJsonString(body,"swing_poi_direction",ml_swing_poi_direction);
+    ExtractMLJsonString(body,"swing_poi_source",ml_swing_poi_source);
+    ExtractMLJsonNumber(body,"swing_poi_low",ml_swing_poi_low);
+    ExtractMLJsonNumber(body,"swing_poi_high",ml_swing_poi_high);
+    ExtractMLJsonNumber(body,"swing_poi_confidence",ml_swing_poi_confidence);
+    ExtractMLJsonNumber(body,"swing_stop_atr",ml_swing_stop_atr);
+    ExtractMLJsonNumber(body,"swing_target_atr",ml_swing_target_atr);
+    ExtractMLJsonNumber(body,"swing_atr",ml_swing_atr);
+    if(ml_scalp_poi_low<=0 || ml_scalp_poi_high<ml_scalp_poi_low ||
+       ml_scalp_poi_source!="validated_ml_scalp_execution") {
+        ml_scalp_poi_direction="NONE";
+        ml_scalp_poi_low=0;
+        ml_scalp_poi_high=0;
+    }
+    if(ml_swing_poi_low<=0 || ml_swing_poi_high<ml_swing_poi_low ||
+       ml_swing_poi_source!="validated_ml_swing_execution") {
+        ml_swing_poi_direction="NONE";
+        ml_swing_poi_low=0;
+        ml_swing_poi_high=0;
+    }
     string timeframe_keys[6]={"h4","h1","m30","m15","m5","m1"};
     for(int tf=0;tf<ArraySize(timeframe_keys);tf++) {
         string key=timeframe_keys[tf];
@@ -1924,6 +1967,12 @@ void ClearMLPrediction(string reason) {
     ml_model_class_probability=0; ml_runner_up_probability=0;
     ml_entry_triggered=false; ml_entry_price=0; ml_entry_zone_low=0; ml_entry_zone_high=0;
     ml_entry_candle_low=0; ml_entry_candle_high=0;
+    ml_scalp_poi_direction="NONE"; ml_scalp_poi_source="unavailable";
+    ml_scalp_poi_low=0; ml_scalp_poi_high=0; ml_scalp_poi_confidence=0;
+    ml_scalp_stop_atr=0; ml_scalp_target_atr=0; ml_scalp_atr=0;
+    ml_swing_poi_direction="NONE"; ml_swing_poi_source="unavailable";
+    ml_swing_poi_low=0; ml_swing_poi_high=0; ml_swing_poi_confidence=0;
+    ml_swing_stop_atr=0; ml_swing_target_atr=0; ml_swing_atr=0;
     for(int tf=0;tf<6;tf++) {
         ml_tf_demand_low[tf]=0;
         ml_tf_demand_high[tf]=0;
@@ -2166,15 +2215,72 @@ bool MLCurrentPriceInsideEntryZone() {
         SymbolInfoDouble(_Symbol,SYMBOL_BID);
     return executable_price>=ml_entry_zone_low && executable_price<=ml_entry_zone_high;
 }
+bool SelectTouchedMLExecutionZone() {
+    string side=ml_h1_signal;
+    if((side!="BUY" && side!="SELL") || ml_trend_direction!=side) return false;
+    double executable_price=side=="BUY"?SymbolInfoDouble(_Symbol,SYMBOL_ASK):
+        SymbolInfoDouble(_Symbol,SYMBOL_BID);
+    bool scalp_allowed=runtime_operating_mode!=NEXA_SWING && IsGoldSymbol() &&
+        MLTimeframesAlignedForMode(side,"SCALP") &&
+        ml_scalp_poi_direction==side && ml_scalp_poi_low>0 &&
+        ml_scalp_poi_high>=ml_scalp_poi_low &&
+        ml_scalp_poi_source=="validated_ml_scalp_execution" &&
+        ml_scalp_stop_atr>0 && ml_scalp_target_atr>0 && ml_scalp_atr>0 &&
+        ml_scalp_poi_confidence>=MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence) &&
+        executable_price>=ml_scalp_poi_low && executable_price<=ml_scalp_poi_high;
+    bool swing_allowed=runtime_operating_mode!=NEXA_SCALP &&
+        MLTimeframesAlignedForMode(side,"SWING") &&
+        ml_swing_poi_direction==side && ml_swing_poi_low>0 &&
+        ml_swing_poi_high>=ml_swing_poi_low &&
+        ml_swing_poi_source=="validated_ml_swing_execution" &&
+        ml_swing_stop_atr>0 && ml_swing_target_atr>0 && ml_swing_atr>0 &&
+        executable_price>=ml_swing_poi_low && executable_price<=ml_swing_poi_high;
+    if(!scalp_allowed && !swing_allowed) return false;
+
+    string selected_mode="";
+    if(active_trading_mode=="SCALP" && scalp_allowed) selected_mode="SCALP";
+    else if(active_trading_mode=="SWING" && swing_allowed) selected_mode="SWING";
+    else if(swing_allowed) selected_mode="SWING";
+    else selected_mode="SCALP";
+
+    active_trading_mode=selected_mode;
+    ml_planned_direction=side;
+    ml_entry_direction=side;
+    ml_prediction_direction=side;
+    ml_prediction_signal=side;
+    ml_entry_triggered=true;
+    ml_entry_status="ZONE_TOUCHED";
+    if(selected_mode=="SCALP") {
+        ml_entry_zone_low=ml_scalp_poi_low;
+        ml_entry_zone_high=ml_scalp_poi_high;
+        ml_entry_price=(ml_scalp_poi_low+ml_scalp_poi_high)*0.5;
+        ml_entry_zone_source=ml_scalp_poi_source;
+        ml_prediction_confidence=ml_scalp_poi_confidence;
+        ml_stop_buy_atr=ml_scalp_stop_atr;
+        ml_stop_sell_atr=ml_scalp_stop_atr;
+        ml_target_buy_atr=ml_scalp_target_atr;
+        ml_target_sell_atr=ml_scalp_target_atr;
+        ml_m15_atr=ml_scalp_atr;
+    } else {
+        ml_entry_zone_low=ml_swing_poi_low;
+        ml_entry_zone_high=ml_swing_poi_high;
+        ml_entry_price=(ml_swing_poi_low+ml_swing_poi_high)*0.5;
+        ml_entry_zone_source=ml_swing_poi_source;
+        ml_prediction_confidence=ml_swing_poi_confidence;
+        ml_stop_buy_atr=ml_swing_stop_atr;
+        ml_stop_sell_atr=ml_swing_stop_atr;
+        ml_target_buy_atr=ml_swing_target_atr;
+        ml_target_sell_atr=ml_swing_target_atr;
+        ml_m15_atr=ml_swing_atr;
+    }
+    ml_prediction_reason="LIVE_"+selected_mode+"_ML_POI_TOUCHED";
+    return true;
+}
 bool ActivateMLLiveZoneEntry() {
-    if(!runtime_ml_enabled || !MLPredictionFresh() ||
-       (active_trading_mode!="SWING" && active_trading_mode!="SCALP"))
+    if(!runtime_ml_enabled || !MLPredictionFresh() || !SelectTouchedMLExecutionZone())
         return false;
     if((ml_planned_direction!="BUY" && ml_planned_direction!="SELL") ||
        ml_prediction_direction!=ml_planned_direction || !MLTimeframesAligned(ml_planned_direction))
-        return false;
-    if(ml_confirmation_status!="DIRECTION_CONFIRMED" &&
-       ml_confirmation_status!="REVERSAL_CONFIRMED")
         return false;
     if(active_trading_mode=="SCALP" &&
        ml_prediction_confidence<MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence))
@@ -2183,22 +2289,15 @@ bool ActivateMLLiveZoneEntry() {
        (ml_planned_direction=="SELL" && !runtime_sell_enabled))
         return false;
     if(!MLCurrentPriceInsideEntryZone()) return false;
-    ml_entry_triggered=true;
-    ml_entry_direction=ml_planned_direction;
-    ml_entry_status="ZONE_TOUCHED";
-    if(ml_prediction_signal=="WAIT") {
-        ml_prediction_signal=ml_planned_direction;
-        ml_prediction_reason="LIVE_POI_ZONE_TOUCHED";
-        if(runtime_decision_logs)
-            Print("[NEXA][ML][ENTRY] LIVE ZONE TOUCH | direction=",ml_planned_direction,
-                " quote=",DoubleToString(ml_planned_direction=="BUY"?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID),_Digits),
-                " zone=",DoubleToString(ml_entry_zone_low,_Digits),"-",DoubleToString(ml_entry_zone_high,_Digits),
-                " | executing without waiting for next bar");
-        AddMLDashboardLog(StringFormat("LIVE ZONE TOUCH %s @ %s | zone %s-%s",
-            ml_planned_direction,
-            DoubleToString(ml_planned_direction=="BUY"?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID),_Digits),
-            DoubleToString(ml_entry_zone_low,_Digits),DoubleToString(ml_entry_zone_high,_Digits)));
-    }
+    if(runtime_decision_logs)
+        Print("[NEXA][ML][ENTRY] LIVE ",active_trading_mode," POI TOUCH | direction=",ml_planned_direction,
+            " quote=",DoubleToString(ml_planned_direction=="BUY"?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID),_Digits),
+            " zone=",DoubleToString(ml_entry_zone_low,_Digits),"-",DoubleToString(ml_entry_zone_high,_Digits),
+            " | executing without waiting for next bar");
+    AddMLDashboardLog(StringFormat("LIVE %s POI TOUCH %s @ %s | zone %s-%s",
+        active_trading_mode,ml_planned_direction,
+        DoubleToString(ml_planned_direction=="BUY"?SymbolInfoDouble(_Symbol,SYMBOL_ASK):SymbolInfoDouble(_Symbol,SYMBOL_BID),_Digits),
+        DoubleToString(ml_entry_zone_low,_Digits),DoubleToString(ml_entry_zone_high,_Digits)));
     return true;
 }
 string ModeReadinessText() {
@@ -2521,7 +2620,8 @@ void ResetCounters() {
 //+------------------------------------------------------------------+
 void OnTimer() {
     uint now=GetTickCount();
-    if(now-dashboard_last_refresh>=(uint)runtime_refresh_ms) { dashboard_last_refresh=now; UpdateDashboard(); SyncDashboardStateWithServer(); }
+    if(now-dashboard_last_refresh>=(uint)runtime_refresh_ms) { dashboard_last_refresh=now; UpdateDashboard(); }
+    SyncDashboardStateWithServer();
     UpdateCounters();
     static datetime last_heartbeat=0;
     if(TimeLocal()-last_heartbeat>=60) { last_heartbeat=TimeLocal(); WriteTelemetryHeartbeat(runtime_trading_enabled?"ACTIVE":"STOPPED"); }
@@ -2711,7 +2811,7 @@ void ProcessDashboardAction(string key) {
     else if(key=="ScalpPositionsPlus")runtime_scalp_max_positions=(int)MathMin(20,runtime_scalp_max_positions+1);
     else if(key=="IntervalMinus")runtime_min_trade_minutes=(int)MathMax(0,runtime_min_trade_minutes-1); 
     else if(key=="IntervalPlus")runtime_min_trade_minutes=(int)MathMin(240,runtime_min_trade_minutes+1);
-    else if(key=="RefreshMinus")runtime_refresh_ms=(int)MathMax(100,runtime_refresh_ms-50); 
+    else if(key=="RefreshMinus")runtime_refresh_ms=(int)MathMax(50,runtime_refresh_ms-50);
     else if(key=="RefreshPlus")runtime_refresh_ms=(int)MathMin(2000,runtime_refresh_ms+50);
     else if(key=="RiskMinus")runtime_risk_percentage=MathMax(0.1,runtime_risk_percentage-0.1); 
     else if(key=="RiskPlus")runtime_risk_percentage=MathMin(10.0,runtime_risk_percentage+0.1);
@@ -2740,7 +2840,7 @@ void ProcessDashboardAction(string key) {
 //+------------------------------------------------------------------+
 void SyncDashboardStateWithServer() {
     static uint last_sync=0;
-    if(GetTickCount()-last_sync < 10000) return;
+    if(GetTickCount()-last_sync < 30000) return;
     last_sync=GetTickCount();
 
     if(LICENSE_API_BASE_URL=="") return;
@@ -2760,7 +2860,7 @@ void SyncDashboardStateWithServer() {
     StringToCharArray(json,post_data,0,StringLen(json),CP_UTF8);
     string result_headers="";
     string headers="Content-Type: application/json\r\nAccept: application/json\r\n";
-    WebRequest("POST",url,headers,3000,post_data,result,result_headers);
+    WebRequest("POST",url,headers,1000,post_data,result,result_headers);
 }
 
 //+------------------------------------------------------------------+

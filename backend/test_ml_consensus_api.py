@@ -380,6 +380,14 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["risk_target_atr"], 1.0)
         self.assertEqual(result["execution_atr"], 0.25)
         self.assertTrue(result["entry_triggered"])
+        self.assertEqual(result["scalp_poi_direction"], "BUY")
+        self.assertEqual(result["scalp_poi_source"], "validated_ml_scalp_execution")
+        self.assertEqual(result["scalp_poi_low"], 99.5)
+        self.assertEqual(result["scalp_stop_atr"], 0.7)
+        self.assertEqual(result["swing_poi_direction"], "BUY")
+        self.assertEqual(result["swing_poi_source"], "validated_ml_swing_execution")
+        self.assertEqual(result["swing_poi_low"], 99.5)
+        self.assertEqual(result["swing_stop_atr"], 1.0)
 
     def test_six_timeframe_range_blocks_scalp_until_h1_has_direction(self):
         candle = self.payload["h1_candles"]
@@ -434,6 +442,8 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["entry_zone_source"], "unavailable")
         self.assertEqual(result["entry_zone_low"], 0.0)
         self.assertEqual(result["entry_zone_high"], 0.0)
+        self.assertEqual(result["scalp_poi_direction"], "NONE")
+        self.assertEqual(result["swing_poi_direction"], "NONE")
         self.assertFalse(result["entry_triggered"])
         self.assertEqual(result["timeframes"]["h4"]["demand_low"], 97.0)
         self.assertEqual(result["timeframes"]["h4"]["supply_high"], 103.0)
@@ -519,6 +529,10 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["entry_zone_source"], "validated_ml_scalp_execution")
         self.assertEqual(result["entry_zone_low"], 99.5)
         self.assertEqual(result["entry_zone_high"], 100.5)
+        self.assertEqual(result["scalp_poi_direction"], "SELL")
+        self.assertEqual(result["swing_poi_direction"], "SELL")
+        self.assertEqual(result["scalp_poi_source"], "validated_ml_scalp_execution")
+        self.assertEqual(result["swing_poi_source"], "validated_ml_swing_execution")
         self.assertEqual(result["risk_target_atr"], 1.0)
 
     def test_six_timeframe_route_blocks_entries_against_h1_even_when_h4_agrees(self):
