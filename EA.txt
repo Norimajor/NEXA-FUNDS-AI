@@ -12,6 +12,8 @@
 #define EA_VERSION NEXA_VERSION
 #define DASHBOARD_VERSION NEXA_VERSION
 #define EA_MAGIC_NUMBER 123456
+// Optional build-time Render INGEST_API_KEY; keep blank in shared source.
+#define NEXA_ML_API_KEY ""
 const double SCALP_MIN_ML_CONFIDENCE=60.0;
 
 #include <Object.mqh>
@@ -2044,6 +2046,12 @@ int OnInit() {
     runtime_ml_api_key=InpMLApiKey;
     StringTrimLeft(runtime_ml_api_key); StringTrimRight(runtime_ml_api_key);
     if(runtime_ml_api_key!="") runtime_ml_key_source="EA Inputs";
+    if(runtime_ml_api_key=="") {
+        runtime_ml_api_key=NEXA_ML_API_KEY;
+        StringTrimLeft(runtime_ml_api_key);
+        StringTrimRight(runtime_ml_api_key);
+        if(runtime_ml_api_key!="") runtime_ml_key_source="compiled EA";
+    }
     if(runtime_ml_api_key=="") {
         int keyfile=FileOpen("NEXA_ML_API_KEY.txt",FILE_READ|FILE_TXT|FILE_ANSI);
         if(keyfile!=INVALID_HANDLE) {
