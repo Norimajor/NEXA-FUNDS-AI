@@ -283,25 +283,6 @@ def _entry_candidate(first: dict, second: dict, trend: str) -> tuple[str, float,
     return first_signal, confidence, first
 
 
-def _range_scalp_candidate(first: dict, second: dict) -> tuple[str, float, dict]:
-    first_signal = first.get("signal", "WAIT")
-    if first_signal not in {"BUY", "SELL"} or second.get("signal") != first_signal:
-        return "WAIT", 0.0, {}
-
-    confidence = min(
-        float(first.get("confidence", 0.0) or 0.0),
-        float(second.get("confidence", 0.0) or 0.0),
-    )
-    if confidence < prediction_threshold * 100:
-        return "WAIT", 0.0, {}
-
-    result = dict(first)
-    result["setup_type"] = "range_scalp"
-    result["confidence"] = confidence
-    result["signal_reason"] = "RANGE_SCALP_MODEL_CONFLUENCE"
-    return first_signal, confidence, result
-
-
 def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
     candle_sets = {
         "H4": batch.h4_candles,
@@ -351,12 +332,6 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
     scalp_signal, scalp_confidence, scalp_result = _entry_candidate(
         analyses["M1"], analyses["M5"], trend
     )
-    if h1_range_usable:
-        scalp_signal, scalp_confidence, scalp_result = _range_scalp_candidate(
-            analyses["M1"], analyses["M5"]
-        )
-        if scalp_signal in {"BUY", "SELL"}:
-            mode, signal, confidence, entry_result = "SCALP", scalp_signal, scalp_confidence, scalp_result
     swing_signal, swing_confidence, swing_result = _entry_candidate(
         analyses["M15"], analyses["M30"], trend
     )
@@ -470,7 +445,9 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
         "timeframe": "H4+H1+M30+M15+M5+M1",
         "signal": signal,
         "signal_reason": (
-            "WAIT_FOR_VALIDATED_ML_POI"
+            "WAIT_FOR_H1_DIRECTION"
+            if mode == "WAIT" and not h1_trend_usable
+            else "WAIT_FOR_VALIDATED_ML_POI"
             if mode == "WAIT" and any(
                 value in {"BUY", "SELL"} for value in (scalp_signal, swing_signal)
             )
@@ -496,8 +473,8 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
         ),
         "setup_context": (
             (
-                "H1 confirms RANGE; H4 is contextual; M1 and M5 must agree, then "
-                "the validated ML execution model supplies the entry POI."
+                "H1 has no directional trend; wait for H1 direction before using "
+                "M1/M5 scalp confirmation or a validated ML entry POI."
             )
             if h1_range_usable
             else (
@@ -507,8 +484,8 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
         ),
         "decision_explanation": (
             (
-                "H1 RANGE is the regime gate; a scalp requires M1/M5 confluence and "
-                "a validated learned execution POI."
+                "H1 has no usable directional trend, so directional scalp and swing "
+                "entries are blocked until H1 confirms BUY or SELL."
             )
             if h1_range_usable
             else (
@@ -521,9 +498,7 @@ def _analyze_multi_timeframe(batch: MultiTimeframeCandleBatch) -> dict:
             if mode == "WAIT" and signal == "WAIT" and not selected_plan
             and any(value in {"BUY", "SELL"} for value in (scalp_signal, swing_signal))
             else
-            "RANGE_SCALP_CONFIRMED"
-            if h1_range_usable and mode == "SCALP" and signal in {"BUY", "SELL"}
-            else "RANGE_WAIT_FOR_SCALP_SETUP"
+            "WAIT_FOR_H1_DIRECTION"
             if h1_range_usable
             else "DIRECTION_CONFIRMED"
             if h1_trend_usable

@@ -12,8 +12,6 @@
 #define EA_VERSION NEXA_VERSION
 #define DASHBOARD_VERSION NEXA_VERSION
 #define EA_MAGIC_NUMBER 123456
-// Optional build-time ML credential. Paste the Render INGEST_API_KEY between the quotes before compiling.
-#define NEXA_ML_API_KEY "8d3f0c29059244368ac6203b1b32118ae2d27035e79f4c559b0f9106d952ab32"
 const double SCALP_MIN_ML_CONFIDENCE=60.0;
 
 #include <Object.mqh>
@@ -22,6 +20,7 @@ const double SCALP_MIN_ML_CONFIDENCE=60.0;
 #include <Trade\OrderInfo.mqh>
 #include <Trade\HistoryOrderInfo.mqh>
 #include <Trade\DealInfo.mqh>
+#include <Canvas\Canvas.mqh>
 
 enum NEXA_DASH_THEME { THEME_GOLD=0, THEME_EMERALD, THEME_OCEAN, THEME_CRIMSON, THEME_VIOLET, THEME_CYAN, THEME_SILVER, THEME_AMBER };
 enum NEXAOperatingMode { NEXA_AUTO=0, NEXA_SWING=1, NEXA_SCALP=2 };
@@ -32,18 +31,12 @@ input group "=== NEXA ML SERVICE CONNECTION ==="
 input string InpMLApiKey = ""; // Optional per-terminal key; never put a shared production key in distributed source
 input int InpMLTimeoutMs = 60000; // Allow Render cold starts and slower inference responses
 input int InpMLCheckSeconds = 5; // Minimum delay between prediction requests
-input group "=== REMOTE MT5 CHART PANEL ==="
-input string InpDashboardPanelUrl = "https://nexafunds-app.onrender.com/api/mt5/panel.bmp";
-input string InpDashboardPanelApiKey = ""; // Set to MT5_API_KEY; allow the API host in MT5 WebRequest settings
-input int InpDashboardPanelTimeoutMs = 2000;
-input int InpDashboardPanelX = 470;
-input int InpDashboardPanelY = 30;
 const string LICENSE_API_BASE_URL = "https://nexafunds-steel.vercel.app";
 const string LICENSE_PRODUCT_ID = "nexa-ai-pro";
 
 // Runtime defaults; dashboard edits take effect immediately in this chart session.
 bool InpUseMLService=true, InpForceDataLoggingInTester=true, InpEnableStructuredData=true;
-bool InpLogRejectedDecisions=true, InpShowDashboard=false; // Use the remote bitmap panel as the only chart dashboard.
+bool InpLogRejectedDecisions=true, InpShowDashboard=true;
 ENUM_BASE_CORNER InpDashboardCorner=CORNER_LEFT_UPPER;
 const int InpDashboardX=16, InpDashboardY=24;
 const string ML_RENDER_BASE_URL="https://nexa-funds-ai.onrender.com";
@@ -140,7 +133,8 @@ string active_trading_mode="WAIT";
 int runtime_news_minutes=30, runtime_session_start=8, runtime_session_end=18;
 int dashboard_x=16, dashboard_y=24, dashboard_scale=100, dashboard_theme=0, dashboard_tab=0;
 bool dashboard_minimized=false;
-int web_panel_x=0, web_panel_y=0, web_panel_width=365, web_panel_height=555;
+CCanvas dashboard_canvas;
+bool dashboard_canvas_ready=false;
 bool dashboard_track_page_objects=false;
 string dashboard_page_object_names[];
 int dashboard_page_object_tabs[];
@@ -203,16 +197,6 @@ int runtime_martingale_max_steps=4;
 datetime ml_prediction_time=0;
 uint ml_prediction_received_ms=0;
 string ml_dashboard_logs[];
-string web_panel_actions[];
-int web_panel_hitboxes[][4];
-uint web_panel_last_success=0, web_panel_next_refresh=0, web_panel_retry_delay=1000;
-bool web_panel_image_loaded=false;
-int web_panel_rendered_tab=-1;
-bool web_panel_mouse_down=false, web_panel_drag_candidate=false, web_panel_dragging=false;
-int web_panel_drag_offset_x=0, web_panel_drag_offset_y=0;
-int web_panel_mouse_x=0, web_panel_mouse_y=0;
-int web_panel_suppress_click_x=0, web_panel_suppress_click_y=0;
-uint web_panel_suppress_click_until=0;
 
 bool ValidateWebsiteLicense(string &status);
 
@@ -273,8 +257,6 @@ bool MLH1DirectionMatches(string side,string h1_direction) {
 }
 bool MLTimeframesAlignedForMode(string side,string mode) {
     if(side!="BUY" && side!="SELL") return false;
-    if(mode=="SCALP" && ml_h1_signal=="RANGE" && ml_trend_direction=="RANGE")
-        return ml_m1_signal==side && ml_m5_signal==side;
     if(ml_h1_signal!=side || !MLH1DirectionMatches(side,ml_trend_direction)) return false;
     if(mode=="SCALP") return ml_m1_signal==side && ml_m5_signal==side;
     if(mode=="SWING") return ml_m15_signal==side && ml_m30_signal==side;
@@ -307,16 +289,6 @@ void RemoveTradeFromArray(int index);
 void UpdateDashboard();
 void RecoverOpenTrades();
 void RenderDashboard();
-bool WP_Init();
-void WP_Deinit();
-void WP_Refresh();
-void WP_OnTimer();
-void WP_OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam);
-void WP_SetPosition();
-void WP_AlignTabButtons();
-void WP_UpdateTabButtons();
-void WP_OnMouseMove(const long &lparam,const double &dparam,const string &sparam);
-string WP_BuildStateJson();
 void DrawMLPointOfInterest();
 void RemoveMLPointOfInterest();
 void CloseAllEAPositions();
@@ -334,6 +306,7 @@ int ConsecutiveEALosses();
 string ModeReadinessText();
 string MLHeaders();
 double ScalpGridSpacing(string direction);
+double NormalizeVolume(double volume);
 
 //+------------------------------------------------------------------+
 //| Legacy native dashboard renderer (disabled; remote panel active)|
@@ -341,9 +314,26 @@ double ScalpGridSpacing(string direction);
 string DashboardBool(bool value) { return value ? "ON" : "OFF"; }
 
 // At 100% scale this is about 315 px, or 8.3 cm on a 96-DPI display.
-const double DASHBOARD_WIDTH_FACTOR=0.70;
-double DashboardScaleFactor() { return DASHBOARD_WIDTH_FACTOR*(double)dashboard_scale/100.0; }
+const double DASHBOARD_WIDTH_FACTOR=365.0/450.0;
+double DashboardScaleFactor() {
+    double scale=(double)dashboard_scale/100.0;
+    long chart_width=ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+    long chart_height=ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+    if(chart_width>0) scale=MathMin(scale,(double)chart_width/365.0);
+    if(chart_height>0) scale=MathMin(scale,(double)chart_height/555.0);
+    return MathMax(0.30,scale);
+}
 int DS(int value) { return (int)MathRound(value*DashboardScaleFactor()); }
+int DSX(int value) { return (int)MathRound(value*DASHBOARD_WIDTH_FACTOR*DashboardScaleFactor()); }
+int DSY(int value) { return (int)MathRound(value*(555.0/540.0)*DashboardScaleFactor()); }
+int DashboardWidth() { return (int)MathRound(365.0*DashboardScaleFactor()); }
+int DashboardHeight() { return (int)MathRound((dashboard_minimized?52.0:555.0)*DashboardScaleFactor()); }
+void ClampDashboardPosition() {
+    long chart_width=ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
+    long chart_height=ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
+    dashboard_x=(int)MathMax(0,MathMin(dashboard_x,chart_width>0?chart_width-DashboardWidth():dashboard_x));
+    dashboard_y=(int)MathMax(0,MathMin(dashboard_y,chart_height>0?chart_height-DashboardHeight():dashboard_y));
+}
 
 //--- central theme engine: one accent drives every themed element ---
 color ThemeAccentFor(int theme) {
@@ -406,12 +396,45 @@ void TrackDashboardPageObject(string name) {
 //+------------------------------------------------------------------+
 //| Clean Dashboard Render Primitives (Optimized, No Mask Clutter)   |
 //+------------------------------------------------------------------+
-void RawRect(string name,int px,int py,int w,int h,color bg,int zorder) {
-    // Unused in clean renderer: eliminates background clutter
+uint CanvasColor(color value) {
+    return ColorToARGB(value,255);
 }
 
-void RoundCorners(string base,int px,int py,int pw,int ph,color outer,int radius,int zorder) {
-    // Clean renderer eliminates redundant corner-mask rectangle clutter
+bool BeginDashboardCanvas() {
+    dashboard_canvas_ready=false;
+    if(!dashboard_canvas.CreateBitmapLabel(0,0,DashName("Surface"),dashboard_x,dashboard_y,
+        DashboardWidth(),DashboardHeight(),COLOR_FORMAT_ARGB_NORMALIZE)) {
+        Print("[NEXA][DASHBOARD] Canvas creation failed: ",GetLastError());
+        return false;
+    }
+    string name=DashName("Surface");
+    ObjectSetInteger(0,name,OBJPROP_CORNER,InpDashboardCorner);
+    ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+    ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+    ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
+    dashboard_canvas.Erase(0);
+    dashboard_canvas_ready=true;
+    return true;
+}
+
+void CanvasRoundedRect(int x,int y,int width,int height,int radius,color fill,color border) {
+    if(!dashboard_canvas_ready || width<2 || height<2) return;
+    int left=DSX(x), top=DSY(y), right=DSX(x+width), bottom=DSY(y+height);
+    int r=(int)MathMax(1,DSX(radius));
+    int inset=(int)MathMax(1,DSX(1));
+    dashboard_canvas.FillRectangle(left+r,top,right-r,bottom,CanvasColor(border));
+    dashboard_canvas.FillRectangle(left,top+r,right,bottom-r,CanvasColor(border));
+    dashboard_canvas.FillCircle(left+r,top+r,r,CanvasColor(border));
+    dashboard_canvas.FillCircle(right-r,top+r,r,CanvasColor(border));
+    dashboard_canvas.FillCircle(left+r,bottom-r,r,CanvasColor(border));
+    dashboard_canvas.FillCircle(right-r,bottom-r,r,CanvasColor(border));
+    int inner_r=(int)MathMax(1,r-inset);
+    dashboard_canvas.FillRectangle(left+r,top+inset,right-r,bottom-inset,CanvasColor(fill));
+    dashboard_canvas.FillRectangle(left+inset,top+r,right-inset,bottom-r,CanvasColor(fill));
+    dashboard_canvas.FillCircle(left+r,top+r,inner_r,CanvasColor(fill));
+    dashboard_canvas.FillCircle(right-r,top+r,inner_r,CanvasColor(fill));
+    dashboard_canvas.FillCircle(left+r,bottom-r,inner_r,CanvasColor(fill));
+    dashboard_canvas.FillCircle(right-r,bottom-r,inner_r,CanvasColor(fill));
 }
 
 void SetDashboardLabel(string name,string text,int x,int y,int font_size,color text_color,string font="") {
@@ -428,8 +451,8 @@ void SetDashboardLabel(string name,string text,int x,int y,int font_size,color t
     }
     if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_LABEL,0,0,0);
     ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner);
-    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
-    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y));
+    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DSX(x));
+    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DSY(y));
     ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(6,DS(font_size)));
     ObjectSetInteger(0,n,OBJPROP_COLOR,text_color);
     ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
@@ -443,17 +466,26 @@ void SetDashboardLabel(string name,string text,int x,int y,int font_size,color t
 void SetDashboardPanel(string name,int x,int y,int width,int height,color bg,color border,bool draggable=false) {
     if(dashboard_values_only) return;
     TrackDashboardPageObject(name);
+    if(name=="Canvas") {
+        CanvasRoundedRect(x,y,width,height,15,bg,border);
+        return;
+    }
+    if(!draggable) {
+        if(dashboard_canvas_ready)
+            dashboard_canvas.FillRectangle(DSX(x),DSY(y),DSX(x+width),DSY(y+height),CanvasColor(bg));
+        return;
+    }
     string n=DashName(name);
     bool created=ObjectFind(0,n)<0;
     if(created) ObjectCreate(0,n,OBJ_RECTANGLE_LABEL,0,0,0);
     ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner);
-    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
-    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y));
-    ObjectSetInteger(0,n,OBJPROP_XSIZE,DS(width));
-    ObjectSetInteger(0,n,OBJPROP_YSIZE,DS(height));
-    ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg);
+    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DSX(x));
+    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DSY(y));
+    ObjectSetInteger(0,n,OBJPROP_XSIZE,DSX(width));
+    ObjectSetInteger(0,n,OBJPROP_YSIZE,DSY(height));
+    ObjectSetInteger(0,n,OBJPROP_BGCOLOR,DashPanel());
     ObjectSetInteger(0,n,OBJPROP_BORDER_TYPE,BORDER_FLAT);
-    ObjectSetInteger(0,n,OBJPROP_COLOR,border);
+    ObjectSetInteger(0,n,OBJPROP_COLOR,clrNONE);
     ObjectSetInteger(0,n,OBJPROP_SELECTABLE,draggable);
     if(created) ObjectSetInteger(0,n,OBJPROP_SELECTED,false);
     ObjectSetInteger(0,n,OBJPROP_HIDDEN,false);
@@ -461,6 +493,11 @@ void SetDashboardPanel(string name,int x,int y,int width,int height,color bg,col
 }
 
 void SetRoundedPanel(string name,int x,int y,int width,int height,color bg,color border,color outer,int radius=3,bool draggable=false) {
+    if(!dashboard_values_only && dashboard_canvas_ready) {
+        TrackDashboardPageObject(name);
+        CanvasRoundedRect(x,y,width,height,MathMax(6,radius*3),bg,border);
+        return;
+    }
     SetDashboardPanel(name,x,y,width,height,bg,border,draggable);
 }
 
@@ -470,10 +507,10 @@ void SetDashboardButton(string name,string text,int x,int y,int width,int height
     string n=DashName(name);
     if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_BUTTON,0,0,0);
     ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner);
-    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DS(x));
-    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DS(y));
-    ObjectSetInteger(0,n,OBJPROP_XSIZE,DS(width));
-    ObjectSetInteger(0,n,OBJPROP_YSIZE,DS(height));
+    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DSX(x));
+    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DSY(y));
+    ObjectSetInteger(0,n,OBJPROP_XSIZE,DSX(width));
+    ObjectSetInteger(0,n,OBJPROP_YSIZE,DSY(height));
     ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(6,DS(8)));
     ObjectSetInteger(0,n,OBJPROP_COLOR,text_color);
     ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg);
@@ -483,6 +520,85 @@ void SetDashboardButton(string name,string text,int x,int y,int width,int height
     ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
     ObjectSetInteger(0,n,OBJPROP_HIDDEN,false);
     ObjectSetInteger(0,n,OBJPROP_ZORDER,10);
+}
+
+void SetDashboardEdit(string name,string value,int x,int y,int width) {
+    TrackDashboardPageObject(name);
+    string n=DashName(name);
+    if(ObjectFind(0,n)<0) ObjectCreate(0,n,OBJ_EDIT,0,0,0);
+    ObjectSetInteger(0,n,OBJPROP_CORNER,InpDashboardCorner);
+    ObjectSetInteger(0,n,OBJPROP_XDISTANCE,dashboard_x+DSX(x));
+    ObjectSetInteger(0,n,OBJPROP_YDISTANCE,dashboard_y+DSY(y));
+    ObjectSetInteger(0,n,OBJPROP_XSIZE,DSX(width));
+    ObjectSetInteger(0,n,OBJPROP_YSIZE,DSY(24));
+    ObjectSetInteger(0,n,OBJPROP_FONTSIZE,MathMax(6,DS(9)));
+    ObjectSetInteger(0,n,OBJPROP_ALIGN,ALIGN_CENTER);
+    ObjectSetInteger(0,n,OBJPROP_COLOR,DashText());
+    ObjectSetInteger(0,n,OBJPROP_BGCOLOR,DashCard());
+    ObjectSetInteger(0,n,OBJPROP_BORDER_COLOR,DashBorderSoft());
+    ObjectSetInteger(0,n,OBJPROP_READONLY,false);
+    ObjectSetInteger(0,n,OBJPROP_SELECTABLE,true);
+    ObjectSetInteger(0,n,OBJPROP_HIDDEN,false);
+    ObjectSetInteger(0,n,OBJPROP_ZORDER,12);
+    if(dashboard_values_only) {
+        if(ObjectGetInteger(0,n,OBJPROP_SELECTED)) return;
+        if(ObjectGetString(0,n,OBJPROP_TEXT)!=value) {
+            ObjectSetString(0,n,OBJPROP_TEXT,value);
+            dashboard_values_changed=true;
+        }
+    } else ObjectSetString(0,n,OBJPROP_TEXT,value);
+}
+
+void DrawEditableSetting(string key,string caption,string value,int y,int column) {
+    int x=18+column*212;
+    SetDashboardLabel(key+"Caption",caption,x,y,7,DashMuted());
+    SetDashboardButton(key+"Minus","-",x,y+12,24,24,DashPanel(),DashBorder(),DashAccent());
+    SetDashboardEdit(key+"Edit",value,x+29,y+12,134);
+    SetDashboardButton(key+"Plus","+",x+168,y+12,24,24,DashPanel(),DashBorder(),DashAccent());
+}
+
+bool ParseDashboardEditValue(string text,double &value) {
+    StringTrimLeft(text);
+    StringTrimRight(text);
+    if(StringLen(text)==0) return false;
+    bool has_digit=false,has_decimal=false;
+    for(int i=0;i<StringLen(text);i++) {
+        ushort c=StringGetCharacter(text,i);
+        if(c>='0' && c<='9') has_digit=true;
+        else if(c=='.' && !has_decimal) has_decimal=true;
+        else return false;
+    }
+    if(!has_digit) return false;
+    value=StringToDouble(text);
+    return MathIsValidNumber(value);
+}
+
+void CommitDashboardEdit(string key) {
+    string object_name=DashName(key+"Edit");
+    string text=ObjectGetString(0,object_name,OBJPROP_TEXT);
+    double value=0;
+    if(!ParseDashboardEditValue(text,value)) {
+        Print("[NEXA][RISK] Invalid dashboard value for ",key,": ",text);
+        RenderDashboard();
+        return;
+    }
+    if(key=="Lot" && value>=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN) &&
+       value<=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX))
+        runtime_fixed_lot=NormalizeVolume(value);
+    else if(key=="Risk" && value>=0.1 && value<=10.0)
+        runtime_risk_percentage=value;
+    else if(key=="MartMult" && value>=1.1 && value<=5.0)
+        runtime_martingale_multiplier=value;
+    else if(key=="MartSteps" && value>=1 && value<=10 &&
+            MathAbs(value-MathRound(value))<0.000001)
+        runtime_martingale_max_steps=(int)MathRound(value);
+    else {
+        Print("[NEXA][RISK] Dashboard value outside allowed range for ",key,": ",text);
+        RenderDashboard();
+        return;
+    }
+    Print("[NEXA][RISK] Updated ",key," from dashboard: ",text);
+    RenderDashboard();
 }
 
 void DrawSection(string title,int y) {
@@ -527,6 +643,7 @@ void DrawTabs() {
     }
 }
 void DrawTradeTab() {
+    SetRoundedPanel("TradeControlCard",18,96,414,98,DashCard(),DashBorderSoft(),DashBg(),10);
     DrawSection("TRADE CONTROL",102);
     SetDashboardButton("StartTrading","START TRADING",18,126,190,32,DashPanel(),DashGreen(),DashGreen());
     SetDashboardButton("StopTrading","STOP & CLOSE EA TRADES",217,126,215,32,DashPanel(),DashRed(),DashRed());
@@ -534,14 +651,15 @@ void DrawTradeTab() {
     DrawSection("RISK MANAGEMENT  |  LOT SIZING",202);
     string modes[]={"FIXED LOT","RISK %","MARTINGALE"};
     for(int i=0;i<3;i++) SetDashboardButton("LotMode"+IntegerToString(i),modes[i],18+i*138,224,128,25,runtime_lot_mode==i?DashAccent():DashPanel(),DashAccent(),runtime_lot_mode==i?DashOnAccent():DashText());
-    DrawSettingStepper("Lot",runtime_lot_mode==2?"Base lot":"Fixed lot",DoubleToString(runtime_fixed_lot,2),256,0);
-    DrawSettingStepper("Risk","Risk % per trade",DoubleToString(runtime_risk_percentage,1),256,1);
-    DrawSettingStepper("MartMult","Martingale x",DoubleToString(runtime_martingale_multiplier,2),288,0);
-    DrawSettingStepper("MartSteps","Max steps",IntegerToString(runtime_martingale_max_steps),288,1);
+    DrawEditableSetting("Lot",runtime_lot_mode==2?"Base lot":"Fixed lot",DoubleToString(runtime_fixed_lot,2),256,0);
+    DrawEditableSetting("Risk","Risk % per trade",DoubleToString(runtime_risk_percentage,1),256,1);
+    DrawEditableSetting("MartMult","Martingale x",DoubleToString(runtime_martingale_multiplier,2),288,0);
+    DrawEditableSetting("MartSteps","Max steps",IntegerToString(runtime_martingale_max_steps),288,1);
     SetDashboardLabel("LotActive","ACTIVE: "+LotModeText()+(runtime_lot_mode==2?StringFormat("  |  losing streak %d",ConsecutiveEALosses()):""),18,324,8,DashAccent(),FontMedium());
     DrawMetric("Balance","BALANCE",DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2),18,342);
     DrawMetric("Equity","EQUITY",DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2),154,342);
     DrawMetric("Floating","FLOATING P/L",DoubleToString(AccountInfoDouble(ACCOUNT_PROFIT),2),290,342,142);
+    SetRoundedPanel("TradeGateCard",18,398,414,58,DashCard(),DashBorderSoft(),DashBg(),9);
     SetDashboardLabel("TradeState",CompactMLText(ModeReadinessText(),67),18,404,9,DashAccent());
     SetDashboardLabel("MLAlign",StringFormat("H4 %s H1 %s | %s %s/%s | ML %s",
         ml_h4_signal,ml_h1_signal,active_trading_mode,
@@ -597,10 +715,7 @@ string CompactMLText(string value,int max_length=70) {
     if(StringLen(value)>max_length) return StringSubstr(value,0,max_length-3)+"...";
     return value;
 }
-void RemoveMLPointOfInterest() {
-    ObjectDelete(0,ml_poi_prefix+"ZONE");
-    ObjectDelete(0,ml_poi_prefix+"MID");
-    ObjectDelete(0,ml_poi_prefix+"LABEL");
+void RemoveMLContextZones() {
     ObjectDelete(0,ml_poi_prefix+"BULL_ZONE");
     ObjectDelete(0,ml_poi_prefix+"BULL_LABEL");
     ObjectDelete(0,ml_poi_prefix+"BEAR_ZONE");
@@ -613,6 +728,12 @@ void RemoveMLPointOfInterest() {
         ObjectDelete(0,ml_poi_prefix+key+"SUPPLY_ZONE");
         ObjectDelete(0,ml_poi_prefix+key+"SUPPLY_LABEL");
     }
+}
+void RemoveMLPointOfInterest() {
+    ObjectDelete(0,ml_poi_prefix+"ZONE");
+    ObjectDelete(0,ml_poi_prefix+"MID");
+    ObjectDelete(0,ml_poi_prefix+"LABEL");
+    RemoveMLContextZones();
 }
 void DrawMLPriceZone(string suffix,string caption,double low,double high,color zone_color,datetime left,datetime right) {
     string zone=ml_poi_prefix+suffix+"ZONE";
@@ -645,6 +766,7 @@ void DrawMLPriceZone(string suffix,string caption,double low,double high,color z
     ObjectSetInteger(0,label,OBJPROP_HIDDEN,true);
 }
 void DrawMLPointOfInterest() {
+    RemoveMLContextZones();
     if(!ml_prediction_available) {
         RemoveMLPointOfInterest();
         return;
@@ -654,8 +776,9 @@ void DrawMLPointOfInterest() {
     datetime left=now-seconds*20;
     datetime right=now+seconds*6;
     string entry_direction=ml_poi_direction;
-    if(entry_direction!="BUY" && entry_direction!="SELL") entry_direction=ml_planned_direction;
     bool valid_entry=(entry_direction=="BUY" || entry_direction=="SELL") &&
+        entry_direction==ml_h1_signal && entry_direction==ml_trend_direction &&
+        StringFind(ml_entry_zone_source,"validated_ml_")==0 &&
         ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low;
     color poi_color=entry_direction=="BUY"?DashGreen():DashRed();
     if(valid_entry) {
@@ -675,21 +798,6 @@ void DrawMLPointOfInterest() {
         ObjectSetInteger(0,mid,OBJPROP_SELECTABLE,false);
         ObjectSetInteger(0,mid,OBJPROP_HIDDEN,true);
     } else ObjectDelete(0,mid);
-    DrawMLPriceZone("BULL_","NEXA ML BULLISH REVERSAL | "+ml_bullish_reversal_source,
-        ml_potential_bullish_reversal_low,ml_potential_bullish_reversal_high,DashGreen(),left,right);
-    DrawMLPriceZone("BEAR_","NEXA ML BEARISH REVERSAL | "+ml_bearish_reversal_source,
-        ml_potential_bearish_reversal_low,ml_potential_bearish_reversal_high,DashRed(),left,right);
-    string timeframes[6]={"H4","H1","M30","M15","M5","M1"};
-    for(int i=0;i<ArraySize(timeframes);i++) {
-        double color_share=0.55+0.06*i;
-        color demand_color=MixColor(DashGreen(),DashBg(),color_share);
-        color supply_color=MixColor(DashRed(),DashBg(),color_share);
-        string suffix="TF_"+timeframes[i]+"_";
-        DrawMLPriceZone(suffix+"DEMAND_","NEXA "+timeframes[i]+" DEMAND",
-            ml_tf_demand_low[i],ml_tf_demand_high[i],demand_color,left,right);
-        DrawMLPriceZone(suffix+"SUPPLY_","NEXA "+timeframes[i]+" SUPPLY",
-            ml_tf_supply_low[i],ml_tf_supply_high[i],supply_color,left,right);
-    }
     ChartRedraw();
 }
 void DrawAITab() {
@@ -778,6 +886,10 @@ void DrawSettingsTab() {
 }
 void CreateDashboard() {
     if(!InpShowDashboard) return;
+    if(!dashboard_values_only) {
+        ClampDashboardPosition();
+        BeginDashboardCanvas();
+    }
     int h = dashboard_minimized ? 48 : 540;
 
     // Master interactive canvas & frame
@@ -788,11 +900,14 @@ void CreateDashboard() {
 
     bool active = runtime_trading_enabled;
     color state_color = active ? DashGreen() : DashRed();
-    SetDashboardPanel("StatusPill", 296, 12, 92, 22, MixColor(state_color, DashPanel(), 0.16), state_color);
+    SetRoundedPanel("StatusPill",296,12,92,22,MixColor(state_color,DashPanel(),0.16),state_color,DashBg(),8);
     SetDashboardLabel("Status", active ? "ACTIVE" : "STOPPED", 312, 16, 9, state_color, FontMedium());
     SetDashboardButton("MinTop", dashboard_minimized ? "+" : "-", 406, 11, 30, 23, DashPanel(), DashBorder(), DashAccent());
 
-    if(dashboard_minimized) return;
+    if(dashboard_minimized) {
+        if(dashboard_canvas_ready) dashboard_canvas.Update(false);
+        return;
+    }
 
     DrawTabs();
     dashboard_track_page_objects = !dashboard_values_only;
@@ -808,8 +923,9 @@ void CreateDashboard() {
     SetDashboardPanel("FooterLine", 14, 508, 422, 1, DashBorderSoft(), DashBorderSoft());
     SetDashboardLabel("Footer", StringFormat("SERVER  %s  |  %s", TimeToString(TimeCurrent(), TIME_DATE), TimeToString(TimeCurrent(), TIME_SECONDS)), 18, 516, 8, DashMuted());
     SetDashboardLabel("FooterState", MLLinkStateText(), 330, 516, 8, MLLinkColor());
+    if(dashboard_canvas_ready) dashboard_canvas.Update(false);
 }
-void RenderDashboard() { if(!InpShowDashboard)return; RemoveDashboard(); CreateDashboard(); ChartRedraw(); }
+void RenderDashboard() { if(!InpShowDashboard)return; ClampDashboardPosition(); RemoveDashboard(); CreateDashboard(); ChartRedraw(); }
 bool DashboardTabHasObjects(int tab) {
     for(int i=0;i<ArraySize(dashboard_page_object_names);i++)
         if(dashboard_page_object_tabs[i]==tab && ObjectFind(0,dashboard_page_object_names[i])>=0)
@@ -838,19 +954,8 @@ void SwitchDashboardTab(int tab) {
         dashboard_tab=tab;
         return;
     }
-    int previous_tab=dashboard_tab;
-    bool tab_already_built=DashboardTabHasObjects(tab);
     dashboard_tab=tab;
-    SetDashboardTabVisible(previous_tab,false);
-    if(tab_already_built) {
-        SetDashboardTabVisible(tab,true);
-        SetDashboardTabButtonState(previous_tab,false);
-        SetDashboardTabButtonState(tab,true);
-        UpdateDashboard();
-    } else {
-        CreateDashboard();
-    }
-    ChartRedraw();
+    RenderDashboard();
 }
 void UpdateDashboard() {
     if(!InpShowDashboard)return;
@@ -865,6 +970,10 @@ void UpdateDashboard() {
     if(dashboard_values_changed)ChartRedraw();
 }
 void RemoveDashboard() {
+    if(dashboard_canvas_ready) {
+        dashboard_canvas.Destroy();
+        dashboard_canvas_ready=false;
+    }
     ObjectsDeleteAll(0,dashboard_prefix);
     ArrayResize(dashboard_page_object_names,0);
     ArrayResize(dashboard_page_object_tabs,0);
@@ -1553,15 +1662,9 @@ bool AcceptMLPrediction(string body) {
         (direction=="BUY" || direction=="SELL" || planned_direction=="BUY" || planned_direction=="SELL");
     string selected_mode=ml_recommended_mode;
     string selected_signal="WAIT";
-    bool range_scalp_confirmed=
-        ml_confirmation_status=="RANGE_SCALP_CONFIRMED" &&
-        ml_recommended_mode=="SCALP" && ml_h1_signal=="RANGE" &&
-        ml_trend_direction=="RANGE" && (signal=="BUY" || signal=="SELL") &&
-        ml_m1_signal==signal && ml_m5_signal==signal &&
-        ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low;
     bool learned_setup_confirmed=
         ml_confirmation_status=="DIRECTION_CONFIRMED" ||
-        ml_confirmation_status=="REVERSAL_CONFIRMED" || range_scalp_confirmed;
+        ml_confirmation_status=="REVERSAL_CONFIRMED";
     bool server_setup_valid=(ml_recommended_mode=="SWING" || ml_recommended_mode=="SCALP") &&
         learned_setup_confirmed && (signal=="BUY" || signal=="SELL") &&
         direction==signal && planned_direction==signal &&
@@ -1608,22 +1711,24 @@ bool AcceptMLPrediction(string body) {
         (selected_signal=="BUY" || selected_signal=="SELL");
     if(selected_mode=="SCALP") {
         if(selected_signal=="BUY" || selected_signal=="SELL") {
-            bool buy_side=selected_signal=="BUY";
-            double fallback_low=buy_side?ml_potential_bullish_reversal_low:ml_potential_bearish_reversal_low;
-            double fallback_high=buy_side?ml_potential_bullish_reversal_high:ml_potential_bearish_reversal_high;
-            if(ml_entry_zone_low<=0 || ml_entry_zone_high<ml_entry_zone_low) {
-                ml_entry_zone_low=fallback_low;
-                ml_entry_zone_high=fallback_high;
-                ml_entry_price=(fallback_low>0 && fallback_high>=fallback_low)?(fallback_low+fallback_high)*0.5:0;
-                ml_entry_zone_source=buy_side?ml_bullish_reversal_source:ml_bearish_reversal_source;
-            }
-            bool valid_scalp_zone=ml_entry_zone_low>0 && ml_entry_zone_high>=ml_entry_zone_low;
+            bool valid_scalp_zone=ml_entry_zone_low>0 &&
+                ml_entry_zone_high>=ml_entry_zone_low &&
+                ml_entry_zone_source=="validated_ml_scalp_execution";
             bool valid_scalp_candle=ml_entry_candle_low>0 && ml_entry_candle_high>=ml_entry_candle_low;
-            ml_entry_triggered=valid_scalp_zone && valid_scalp_candle &&
-                ml_entry_candle_low<=ml_entry_zone_high && ml_entry_candle_high>=ml_entry_zone_low;
-            ml_planned_direction=selected_signal;
-            ml_entry_direction=ml_entry_triggered?selected_signal:"WAIT";
-            ml_entry_status=ml_entry_triggered?"ZONE_TOUCHED":valid_scalp_zone?"WAIT_FOR_ZONE":"NO_ENTRY_ZONE";
+            if(!valid_scalp_zone) {
+                selected_mode="WAIT";
+                selected_signal="WAIT";
+                ml_planned_direction="WAIT";
+                ml_entry_direction="WAIT";
+                ml_entry_triggered=false;
+                ml_entry_status="NO_VALIDATED_ML_ZONE";
+            } else {
+                ml_entry_triggered=valid_scalp_candle &&
+                    ml_entry_candle_low<=ml_entry_zone_high && ml_entry_candle_high>=ml_entry_zone_low;
+                ml_planned_direction=selected_signal;
+                ml_entry_direction=ml_entry_triggered?selected_signal:"WAIT";
+                ml_entry_status=ml_entry_triggered?"ZONE_TOUCHED":"WAIT_FOR_ZONE";
+            }
         } else {
             ml_planned_direction="WAIT";
             ml_entry_direction="WAIT";
@@ -1731,7 +1836,7 @@ string MLResponseHeaderValue(string response_headers,string header_name) {
 bool RequestMLPrediction() {
     if(!InpUseMLService || IsTesterRun()) return false;
     string base=MLServiceBaseUrl(); if(StringLen(base)<8) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"ML API base URL not set"); return false; }
-    if(StringLen(runtime_ml_api_key)==0) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"Set InpMLApiKey or provide a build-time/local key"); return false; }
+    if(StringLen(runtime_ml_api_key)==0) { SetMLLinkState(ML_LINK_NOT_CONFIGURED,0,"Set InpMLApiKey or provide a terminal-local key"); return false; }
     string body=BuildMLCandlePayload(); if(body=="") { SetMLLinkState(ML_LINK_NO_RESPONSE,0,"Fewer than 500 completed H4/H1 or 260 completed M30/M15/M5/M1 candles"); return false; }
     char request[]; char response[]; string response_headers=""; string headers=MLHeaders();
     StringToCharArray(body,request,0,StringLen(body),CP_UTF8); ResetLastError(); uint started=GetTickCount();
@@ -1890,11 +1995,6 @@ int OnInit() {
     runtime_ml_api_key=InpMLApiKey;
     StringTrimLeft(runtime_ml_api_key); StringTrimRight(runtime_ml_api_key);
     if(runtime_ml_api_key!="") runtime_ml_key_source="EA Inputs";
-    else {
-        runtime_ml_api_key=NEXA_ML_API_KEY;
-        StringTrimLeft(runtime_ml_api_key); StringTrimRight(runtime_ml_api_key);
-        if(runtime_ml_api_key!="") runtime_ml_key_source="compiled EA";
-    }
     if(runtime_ml_api_key=="") {
         int keyfile=FileOpen("NEXA_ML_API_KEY.txt",FILE_READ|FILE_TXT|FILE_ANSI);
         if(keyfile!=INVALID_HANDLE) {
@@ -1908,20 +2008,17 @@ int OnInit() {
     ResetCounters(); RecoverOpenTrades(); InitializeTesterDataFiles();
     SetMLLinkState(IsTesterRun()?ML_LINK_DISABLED:ML_LINK_NOT_CONFIGURED,0,
         IsTesterRun()?"WebRequest unavailable in Strategy Tester":
-        runtime_ml_api_key==""?"ML key missing: set InpMLApiKey or NEXA_ML_API_KEY":"Awaiting prediction request");
+        runtime_ml_api_key==""?"ML key missing: set InpMLApiKey or NEXA_ML_API_KEY.txt":"Awaiting prediction request");
     RemoveDashboard();
-    web_panel_x=InpDashboardPanelX;
-    web_panel_y=InpDashboardPanelY;
+    dashboard_x=InpDashboardX;
+    dashboard_y=InpDashboardY;
+    RenderDashboard();
     if(!EventSetMillisecondTimer(50)) { Print("[NEXA][ERROR] Dashboard timer failed: ",GetLastError()); return INIT_FAILED; }
-    ResetLastError();
-    if(!ChartSetInteger(0,CHART_EVENT_MOUSE_MOVE,true))
-        Print("[NEXA][PANEL] Mouse tracking could not be enabled: ",GetLastError());
-    if(!WP_Init()) Print("[NEXA][PANEL] Remote panel could not be initialized");
     PrintRuntimeSettings("INITIALIZED");
     Print("[NEXA][LICENSE] ",runtime_license_status," | product=",LICENSE_PRODUCT_ID," | account=",runtime_licensed_account," | server ",LICENSE_API_BASE_URL);
     Print("[NEXA] Data files: ",DataFileName("decisions"),", ",DataFileName("outcomes"),", ",DataFileName("ml"));
     Print("[NEXA] Dashboard refresh=",runtime_refresh_ms,"ms; synchronous ML timeout=",runtime_ml_timeout_ms,"ms; poll=",runtime_ml_check_seconds,"s");
-    if(runtime_ml_api_key=="") Print("[NEXA][ML] No input, build-time, or local API credential supplied; set InpMLApiKey or NEXA_ML_API_KEY");
+    if(runtime_ml_api_key=="") Print("[NEXA][ML] No input or terminal-local API credential supplied; set InpMLApiKey or NEXA_ML_API_KEY.txt");
     else Print("[NEXA][ML] API credential loaded from ",runtime_ml_key_source);
     return INIT_SUCCEEDED;
 }
@@ -1931,7 +2028,7 @@ int OnInit() {
 //+------------------------------------------------------------------+
 
 void OnDeinit(const int reason) {
-    EventKillTimer(); WP_Deinit(); if(atr_handle!=INVALID_HANDLE) IndicatorRelease(atr_handle); WriteTelemetryHeartbeat("STOPPED"); RemoveDashboard(); RemoveMLPointOfInterest();
+    EventKillTimer(); if(atr_handle!=INVALID_HANDLE) IndicatorRelease(atr_handle); WriteTelemetryHeartbeat("STOPPED"); RemoveDashboard(); RemoveMLPointOfInterest();
     Print("[NEXA] Stopped; reason=",reason);
 }
 
@@ -2076,11 +2173,8 @@ bool ActivateMLLiveZoneEntry() {
     if((ml_planned_direction!="BUY" && ml_planned_direction!="SELL") ||
        ml_prediction_direction!=ml_planned_direction || !MLTimeframesAligned(ml_planned_direction))
         return false;
-    bool range_scalp_confirmation=active_trading_mode=="SCALP" &&
-        ml_confirmation_status=="RANGE_SCALP_CONFIRMED" &&
-        ml_h1_signal=="RANGE" && ml_trend_direction=="RANGE";
     if(ml_confirmation_status!="DIRECTION_CONFIRMED" &&
-       ml_confirmation_status!="REVERSAL_CONFIRMED" && !range_scalp_confirmation)
+       ml_confirmation_status!="REVERSAL_CONFIRMED")
         return false;
     if(active_trading_mode=="SCALP" &&
        ml_prediction_confidence<MathMax(SCALP_MIN_ML_CONFIDENCE,runtime_ml_execution_confidence))
@@ -2426,7 +2520,6 @@ void ResetCounters() {
 //| Expert timer function                                           |
 //+------------------------------------------------------------------+
 void OnTimer() {
-    WP_OnTimer();
     uint now=GetTickCount();
     if(now-dashboard_last_refresh>=(uint)runtime_refresh_ms) { dashboard_last_refresh=now; UpdateDashboard(); SyncDashboardStateWithServer(); }
     UpdateCounters();
@@ -2599,8 +2692,7 @@ void ProcessDashboardAction(string key) {
     else if(key=="ScalePlus")dashboard_scale=MathMin(150,dashboard_scale+5);
     else if(key=="ResetPosition"){
         dashboard_x=InpDashboardX;dashboard_y=InpDashboardY;
-        web_panel_x=InpDashboardPanelX;web_panel_y=InpDashboardPanelY;
-        WP_SetPosition();
+        RenderDashboard();
     }
     else if(StringFind(key,"Theme")==0) {
         int selected_theme=(int)StringToInteger(StringSubstr(key,5));
@@ -2671,474 +2763,26 @@ void SyncDashboardStateWithServer() {
     WebRequest("POST",url,headers,3000,post_data,result,result_headers);
 }
 
-#define WP_BITMAP_OBJECT "NEXA_REMOTE_PANEL"
-#define WP_STATUS_OBJECT "NEXA_REMOTE_PANEL_STATUS"
-#define WP_BITMAP_RESOURCE "::nexa_remote_panel"
-#define WP_TAB_OBJECT_PREFIX "NEXA_REMOTE_TAB_"
-#define WP_REFRESH_INTERVAL_MS 500
-#define WP_CLICK_REFRESH_DELAY_MS 50
-string WP_TAB_LABELS[7]={"TRADE","STRATEGY","INFO","NEWS","AI","LOGS","SETTINGS"};
-
-int WP_ReadInt(const char &buffer[],int offset) {
-    return (int)((uint)(uchar)buffer[offset] |
-        ((uint)(uchar)buffer[offset+1]<<8) |
-        ((uint)(uchar)buffer[offset+2]<<16) |
-        ((uint)(uchar)buffer[offset+3]<<24));
-}
-
-int WP_ReadUInt16(const char &buffer[],int offset) {
-    return (int)((uint)(uchar)buffer[offset] | ((uint)(uchar)buffer[offset+1]<<8));
-}
-
-string WP_HeaderValue(const string headers,const string name) {
-    string lines[];
-    int count=StringSplit(headers,'\n',lines);
-    for(int i=0;i<count;i++) {
-        int colon=StringFind(lines[i],":");
-        if(colon<=0 || StringCompare(StringSubstr(lines[i],0,colon),name,false)!=0) continue;
-        string value=StringSubstr(lines[i],colon+1);
-        StringTrimLeft(value);
-        StringTrimRight(value);
-        return value;
-    }
-    return "";
-}
-
-void WP_ParseHitmap(const string hitmap) {
-    string items[];
-    int count=StringSplit(hitmap,';',items);
-    ArrayResize(web_panel_actions,count);
-    ArrayResize(web_panel_hitboxes,count);
-    for(int i=0;i<count;i++) {
-        string fields[];
-        if(StringSplit(items[i],',',fields)!=5) {
-            web_panel_actions[i]="";
-            continue;
-        }
-        web_panel_actions[i]=fields[0];
-        for(int field=0;field<4;field++)
-            web_panel_hitboxes[i][field]=(int)StringToInteger(fields[field+1]);
-    }
-    WP_UpdateTabButtons();
-}
-
-void WP_UpdateTabButtons() {
-    if(ObjectFind(0,WP_BITMAP_OBJECT)>=0) {
-        web_panel_x=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE);
-        web_panel_y=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE);
-    }
-    bool tab_visible[7]={false,false,false,false,false,false,false};
-    for(int i=0;i<ArraySize(web_panel_actions);i++) {
-        string action=web_panel_actions[i];
-        if(StringFind(action,"TAB")!=0) continue;
-        int tab=(int)StringToInteger(StringSubstr(action,3));
-        if(tab<0 || tab>=ArraySize(WP_TAB_LABELS)) continue;
-        tab_visible[tab]=true;
-        string name=WP_TAB_OBJECT_PREFIX+IntegerToString(tab);
-        if(ObjectFind(0,name)<0 && !ObjectCreate(0,name,OBJ_BUTTON,0,0,0)) {
-            Print("[NEXA][PANEL] Navigation button creation failed: ",GetLastError());
-            continue;
-        }
-        ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-        ObjectSetInteger(0,name,OBJPROP_XSIZE,web_panel_hitboxes[i][2]);
-        ObjectSetInteger(0,name,OBJPROP_YSIZE,web_panel_hitboxes[i][3]);
-        ObjectSetString(0,name,OBJPROP_TEXT,WP_TAB_LABELS[tab]);
-        ObjectSetString(0,name,OBJPROP_FONT,"Arial");
-        ObjectSetInteger(0,name,OBJPROP_FONTSIZE,
-            (int)MathMax(5,MathMin(12,MathRound(8.0*web_panel_width/365.0))));
-        ObjectSetInteger(0,name,OBJPROP_BGCOLOR,
-            tab==web_panel_rendered_tab?DashAccent():DashPanel());
-        ObjectSetInteger(0,name,OBJPROP_COLOR,
-            tab==web_panel_rendered_tab?DashOnAccent():DashText());
-        ObjectSetInteger(0,name,OBJPROP_BORDER_COLOR,DashBorder());
-        ObjectSetInteger(0,name,OBJPROP_SELECTABLE,true);
-        ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
-        ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
-        ObjectSetInteger(0,name,OBJPROP_BACK,false);
-        ObjectSetInteger(0,name,OBJPROP_ZORDER,2000);
-        ObjectSetInteger(0,name,OBJPROP_STATE,false);
-    }
-    for(int tab=0;tab<ArraySize(WP_TAB_LABELS);tab++) {
-        string name=WP_TAB_OBJECT_PREFIX+IntegerToString(tab);
-        if(!tab_visible[tab] && ObjectFind(0,name)>=0) ObjectDelete(0,name);
-    }
-    WP_AlignTabButtons();
-}
-
-void WP_AlignTabButtons() {
-    bool changed=false;
-    for(int tab=0;tab<ArraySize(WP_TAB_LABELS);tab++) {
-        string name=WP_TAB_OBJECT_PREFIX+IntegerToString(tab);
-        if(ObjectFind(0,name)<0) continue;
-        int action_index=0;
-        while(action_index<ArraySize(web_panel_actions) &&
-              web_panel_actions[action_index]!="TAB"+IntegerToString(tab))
-            action_index++;
-        if(action_index>=ArraySize(web_panel_actions)) continue;
-        int target_x=web_panel_x+web_panel_hitboxes[action_index][0];
-        int target_y=web_panel_y+web_panel_hitboxes[action_index][1];
-        if((int)ObjectGetInteger(0,name,OBJPROP_XDISTANCE)!=target_x) {
-            ObjectSetInteger(0,name,OBJPROP_XDISTANCE,target_x);
-            changed=true;
-        }
-        if((int)ObjectGetInteger(0,name,OBJPROP_YDISTANCE)!=target_y) {
-            ObjectSetInteger(0,name,OBJPROP_YDISTANCE,target_y);
-            changed=true;
-        }
-    }
-    if(changed) ChartRedraw();
-}
-
-string WP_BuildStateJson() {
-    string json=StringFormat(
-        "{\"version\":\"%s\",\"account\":\"%I64d\",\"symbol\":\"%s\",\"timeframe\":\"%s\","
-        "\"balance\":%.2f,\"equity\":%.2f,\"floating\":%.2f,\"tab\":%d,"
-        "\"theme\":%d,\"scale\":%d,\"minimized\":%s,"
-        "\"trading_active\":%s,\"new_trades_enabled\":%s,\"buy_enabled\":%s,\"sell_enabled\":%s,"
-        "\"license_status\":\"%s\",\"license_valid\":%s,\"ml_status\":\"%s\","
-        "\"signal\":\"%s\",\"confidence\":%.1f,\"model\":\"%s\","
-        "\"lot_mode\":%d,\"fixed_lot\":%.2f,\"risk_pct\":%.1f,"
-        "\"martingale_multiplier\":%.2f,\"martingale_max_steps\":%d,"
-        "\"stop_loss\":%.5f,\"take_profit\":%.5f,\"positions\":%d,"
-        "\"session\":\"%s\",\"gate_status\":\"%s\",\"mode\":\"%s\",\"active_mode\":\"%s\","
-        "\"setup_reason\":\"%s\",\"news_enabled\":%s,\"refresh_ms\":%d,\"max_daily\":%d,"
-        "\"server\":\"%s\",\"date\":\"%s\",\"time\":\"%s\",\"log\":[",
-        JsonEscape(EA_VERSION),(long)AccountInfoInteger(ACCOUNT_LOGIN),
-        JsonEscape(_Symbol),JsonEscape(EnumToString(_Period)),
-        AccountInfoDouble(ACCOUNT_BALANCE),AccountInfoDouble(ACCOUNT_EQUITY),
-        AccountInfoDouble(ACCOUNT_PROFIT),dashboard_tab,dashboard_theme,dashboard_scale,
-        dashboard_minimized?"true":"false",
-        runtime_trading_enabled?"true":"false",runtime_new_trades_enabled?"true":"false",
-        runtime_buy_enabled?"true":"false",runtime_sell_enabled?"true":"false",
-        JsonEscape(runtime_license_status),runtime_license_valid?"true":"false",
-        JsonEscape(MLLinkStateText()),JsonEscape(ml_prediction_signal),ml_prediction_confidence,
-        JsonEscape(ml_model_class),runtime_lot_mode,runtime_fixed_lot,runtime_risk_percentage,
-        runtime_martingale_multiplier,runtime_martingale_max_steps,ml_stop_loss,ml_take_profit,
-        CountEAOpenPositions(),JsonEscape(GetCurrentSession()),JsonEscape(ModeReadinessText()),
-        JsonEscape(OperatingModeText()),JsonEscape(active_trading_mode),JsonEscape(ml_setup_reason),
-        runtime_use_news?"true":"false",runtime_refresh_ms,runtime_max_daily,
-        JsonEscape(AccountInfoString(ACCOUNT_SERVER)),
-        JsonEscape(TimeToString(TimeCurrent(),TIME_DATE)),
-        JsonEscape(TimeToString(TimeCurrent(),TIME_SECONDS))
-    );
-    int log_count=ArraySize(ml_dashboard_logs);
-    int first_log=MathMax(0,log_count-9);
-    for(int i=first_log;i<log_count;i++) {
-        if(i>first_log) json+=",";
-        json+="\""+JsonEscape(ml_dashboard_logs[i])+"\"";
-    }
-    return json+"]}";
-}
-
-bool WP_Init() {
-    ObjectDelete(0,WP_BITMAP_OBJECT);
-    ObjectDelete(0,WP_STATUS_OBJECT);
-    if(!ObjectCreate(0,WP_BITMAP_OBJECT,OBJ_BITMAP_LABEL,0,0,0)) {
-        Print("[NEXA][PANEL] Bitmap object creation failed: ",GetLastError());
-        return false;
-    }
-    ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-    ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE,web_panel_x);
-    ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE,web_panel_y);
-    ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_SELECTABLE,true);
-    ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_SELECTED,false);
-    ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_HIDDEN,true);
-    ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_ZORDER,1000);
-    if(!ObjectCreate(0,WP_STATUS_OBJECT,OBJ_LABEL,0,0,0)) {
-        ObjectDelete(0,WP_BITMAP_OBJECT);
-        Print("[NEXA][PANEL] Status label creation failed: ",GetLastError());
-        return false;
-    }
-    ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-    ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_XDISTANCE,web_panel_x+8);
-    ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_YDISTANCE,web_panel_y+8);
-    ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_COLOR,clrTomato);
-    ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_FONTSIZE,9);
-    ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_SELECTABLE,false);
-    ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_HIDDEN,true);
-    ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_ZORDER,1001);
-    web_panel_last_success=0;
-    web_panel_next_refresh=0;
-    web_panel_retry_delay=1000;
-    web_panel_image_loaded=false;
-    web_panel_rendered_tab=-1;
-    ChartRedraw();
-    return true;
-}
-
-void WP_SetPosition() {
-    if(ObjectFind(0,WP_BITMAP_OBJECT)>=0) {
-        ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE,web_panel_x);
-        ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE,web_panel_y);
-    }
-    WP_AlignTabButtons();
-    if(ObjectFind(0,WP_STATUS_OBJECT)>=0) {
-        ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_XDISTANCE,web_panel_x+8);
-        ObjectSetInteger(0,WP_STATUS_OBJECT,OBJPROP_YDISTANCE,web_panel_y+8);
-    }
-    ChartRedraw();
-}
-
-void WP_Deinit() {
-    ObjectDelete(0,WP_BITMAP_OBJECT);
-    ObjectDelete(0,WP_STATUS_OBJECT);
-    for(int tab=0;tab<ArraySize(WP_TAB_LABELS);tab++)
-        ObjectDelete(0,WP_TAB_OBJECT_PREFIX+IntegerToString(tab));
-    ResourceFree(WP_BITMAP_RESOURCE);
-}
-
-void WP_Refresh() {
-    if(ObjectFind(0,WP_BITMAP_OBJECT)<0 || ObjectFind(0,WP_STATUS_OBJECT)<0) return;
-    uint now=GetTickCount();
-    string api_key=InpDashboardPanelApiKey;
-    StringTrimLeft(api_key);
-    StringTrimRight(api_key);
-    if(api_key=="") {
-        ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: set InpDashboardPanelApiKey");
-        web_panel_next_refresh=now+5000;
-        return;
-    }
-    string url=InpDashboardPanelUrl;
-    StringTrimLeft(url);
-    StringTrimRight(url);
-    if(StringFind(url,"https://")!=0 && StringFind(url,"http://")!=0) {
-        ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: invalid panel URL");
-        web_panel_next_refresh=now+30000;
-        return;
-    }
-    string json=WP_BuildStateJson();
-    char request[],response[];
-    StringToCharArray(json,request,0,StringLen(json),CP_UTF8);
-    string headers="Content-Type: application/json\r\nX-API-Key: "+api_key+"\r\n";
-    string response_headers="";
-    int timeout=(int)MathMax(250,MathMin(10000,InpDashboardPanelTimeoutMs));
-    ResetLastError();
-    int status=WebRequest("POST",url,headers,timeout,request,response,response_headers);
-    int size=ArraySize(response);
-    if(status!=200 || size<54 || (uchar)response[0]!='B' || (uchar)response[1]!='M') {
-        string reason=status<0?"request failed ("+IntegerToString(GetLastError())+")":
-            "server unavailable ("+IntegerToString(status)+")";
-        if(web_panel_last_success==0 || now-web_panel_last_success>10000)
-            ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: "+reason);
-        web_panel_next_refresh=now+web_panel_retry_delay;
-        web_panel_retry_delay=(uint)MathMin(30000,web_panel_retry_delay*2);
-        return;
-    }
-    string rendered_tab_header=WP_HeaderValue(response_headers,"X-Panel-Tab");
-    if(rendered_tab_header=="") {
-        ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: renderer tab sync required");
-        web_panel_next_refresh=now+1000;
-        return;
-    }
-    if(rendered_tab_header!=IntegerToString(dashboard_tab)) {
-        ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: waiting for matching tab");
-        web_panel_next_refresh=now+100;
-        return;
-    }
-    int offset=WP_ReadInt(response,10);
-    int width=WP_ReadInt(response,18);
-    int height=WP_ReadInt(response,22);
-    long pixel_bytes=(long)width*height*4;
-    long image_end=(long)offset+pixel_bytes;
-    if(offset<54 || width<=0 || height<=0 || width>1000 || height>1200 ||
-       WP_ReadUInt16(response,26)!=1 || WP_ReadUInt16(response,28)!=32 ||
-       WP_ReadInt(response,30)!=0 || image_end>size) {
-        ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: invalid image response");
-        web_panel_next_refresh=now+web_panel_retry_delay;
-        web_panel_retry_delay=(uint)MathMin(30000,web_panel_retry_delay*2);
-        return;
-    }
-    uint pixels[];
-    int pixel_count=width*height;
-    if(ArrayResize(pixels,pixel_count)!=pixel_count) {
-        ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: image allocation failed");
-        web_panel_next_refresh=now+web_panel_retry_delay;
-        web_panel_retry_delay=(uint)MathMin(30000,web_panel_retry_delay*2);
-        return;
-    }
-    for(int y=0;y<height;y++) {
-        for(int x=0;x<width;x++) {
-            int source=offset+((height-1-y)*width+x)*4;
-            pixels[y*width+x]=((uint)(uchar)response[source+3]<<24) |
-                ((uint)(uchar)response[source+2]<<16) |
-                ((uint)(uchar)response[source+1]<<8) |
-                (uint)(uchar)response[source];
-        }
-    }
-    if(!ResourceCreate(WP_BITMAP_RESOURCE,pixels,width,height,0,0,width,COLOR_FORMAT_ARGB_NORMALIZE)) {
-        ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"NEXA web panel: image resource update failed");
-        web_panel_next_refresh=now+web_panel_retry_delay;
-        web_panel_retry_delay=(uint)MathMin(30000,web_panel_retry_delay*2);
-        return;
-    }
-    ObjectSetString(0,WP_BITMAP_OBJECT,OBJPROP_BMPFILE,WP_BITMAP_RESOURCE);
-    web_panel_width=width;
-    web_panel_height=height;
-    web_panel_rendered_tab=dashboard_tab;
-    WP_ParseHitmap(WP_HeaderValue(response_headers,"X-Hitmap"));
-    web_panel_last_success=now;
-    web_panel_image_loaded=true;
-    web_panel_retry_delay=1000;
-    web_panel_next_refresh=now+WP_REFRESH_INTERVAL_MS;
-    ObjectSetString(0,WP_STATUS_OBJECT,OBJPROP_TEXT,"");
-    ChartRedraw();
-}
-
-void WP_OnTimer() {
-    if(ObjectFind(0,WP_BITMAP_OBJECT)>=0) {
-        int actual_x=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE);
-        int actual_y=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE);
-        if(actual_x!=web_panel_x || actual_y!=web_panel_y) {
-            web_panel_x=actual_x;
-            web_panel_y=actual_y;
-            WP_SetPosition();
-        }
-    }
-    WP_AlignTabButtons();
-    uint now=GetTickCount();
-    if(web_panel_dragging) return;
-    if(web_panel_next_refresh!=0 && (int)(now-web_panel_next_refresh)<0) return;
-    WP_Refresh();
-}
-
-void WP_OnMouseMove(const long &lparam,const double &dparam,const string &sparam) {
-    int mouse_state=(int)StringToInteger(sparam);
-    bool left_pressed=(mouse_state&1)!=0;
-    int mouse_x=(int)lparam, mouse_y=(int)dparam;
-    web_panel_mouse_x=mouse_x;
-    web_panel_mouse_y=mouse_y;
-    if(!left_pressed) {
-        if(web_panel_mouse_down && web_panel_dragging) {
-            web_panel_suppress_click_until=GetTickCount()+500;
-            web_panel_suppress_click_x=mouse_x;
-            web_panel_suppress_click_y=mouse_y;
-            web_panel_next_refresh=0;
-            Print("[NEXA][PANEL] Moved to x=",web_panel_x," y=",web_panel_y);
-        }
-        web_panel_mouse_down=false;
-        web_panel_drag_candidate=false;
-        web_panel_dragging=false;
-        return;
-    }
-    if(!web_panel_mouse_down) {
-        web_panel_mouse_down=true;
-        web_panel_x=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE);
-        web_panel_y=(int)ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE);
-        int local_x=mouse_x-web_panel_x;
-        int local_y=mouse_y-web_panel_y;
-        int scale_width=MathMax(1,web_panel_width);
-        int header_height=(int)MathRound(38.0*scale_width/365.0);
-        int button_clearance=(int)MathMax(44,MathRound(48.0*scale_width/365.0));
-        web_panel_drag_candidate=web_panel_image_loaded &&
-            local_x>=0 && local_x<web_panel_width-button_clearance &&
-            local_y>=0 && local_y<header_height;
-        if(web_panel_drag_candidate) {
-            web_panel_drag_offset_x=local_x;
-            web_panel_drag_offset_y=local_y;
-        }
-        return;
-    }
-    if(!web_panel_drag_candidate) return;
-    if(!web_panel_dragging &&
-       MathAbs(mouse_x-(web_panel_x+web_panel_drag_offset_x))<4 &&
-       MathAbs(mouse_y-(web_panel_y+web_panel_drag_offset_y))<4) return;
-    web_panel_dragging=true;
-    long chart_width=ChartGetInteger(0,CHART_WIDTH_IN_PIXELS);
-    long chart_height=ChartGetInteger(0,CHART_HEIGHT_IN_PIXELS);
-    web_panel_x=(int)MathMax(0,mouse_x-web_panel_drag_offset_x);
-    web_panel_y=(int)MathMax(0,mouse_y-web_panel_drag_offset_y);
-    if(chart_width>0) web_panel_x=(int)MathMin(web_panel_x,MathMax(0,chart_width-web_panel_width));
-    if(chart_height>0) web_panel_y=(int)MathMin(web_panel_y,MathMax(0,chart_height-web_panel_height));
-    WP_SetPosition();
-}
-
-void WP_OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam) {
-    if(id!=CHARTEVENT_OBJECT_CLICK || sparam!=WP_BITMAP_OBJECT) return;
-    if(web_panel_dragging) {
-        web_panel_dragging=false;
-        web_panel_mouse_down=false;
-        web_panel_drag_candidate=false;
-        web_panel_suppress_click_until=GetTickCount()+500;
-        web_panel_next_refresh=0;
-        ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_SELECTED,false);
-        Print("[NEXA][PANEL] Moved to x=",web_panel_x," y=",web_panel_y);
-        return;
-    }
-    web_panel_mouse_down=false;
-    web_panel_drag_candidate=false;
-    ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_SELECTED,false);
-    if(!web_panel_image_loaded || web_panel_last_success==0 ||
-       GetTickCount()-web_panel_last_success>10000) return;
-    if(web_panel_suppress_click_until!=0) {
-        if((int)(web_panel_suppress_click_until-GetTickCount())>=0) {
-            web_panel_suppress_click_until=0;
-            if(MathAbs(web_panel_mouse_x-web_panel_suppress_click_x)<=8 &&
-               MathAbs(web_panel_mouse_y-web_panel_suppress_click_y)<=8) return;
-        } else {
-            web_panel_suppress_click_until=0;
-        }
-    }
-    int x=web_panel_mouse_x-web_panel_x;
-    int y=web_panel_mouse_y-web_panel_y;
-    for(int i=0;i<ArraySize(web_panel_actions);i++) {
-        if(web_panel_actions[i]=="" || x<web_panel_hitboxes[i][0] ||
-           x>=web_panel_hitboxes[i][0]+web_panel_hitboxes[i][2] ||
-           y<web_panel_hitboxes[i][1] ||
-           y>=web_panel_hitboxes[i][1]+web_panel_hitboxes[i][3]) continue;
-        string action=web_panel_actions[i];
-        if(StringFind(action,"TAB")==0) {
-            int selected_tab=(int)StringToInteger(StringSubstr(action,3));
-            if(selected_tab<0 || selected_tab>6) return;
-        }
-        ProcessDashboardAction(action);
-        Print("[NEXA][PANEL] Click action: ",action);
-        WP_UpdateTabButtons();
-        web_panel_next_refresh=GetTickCount()+WP_CLICK_REFRESH_DELAY_MS;
-        return;
-    }
-    if(x>=0 && y>=0 && x<web_panel_width && y<web_panel_height)
-        Print("[NEXA][PANEL] No control hit at x=",x," y=",y,
-              " | controls=",ArraySize(web_panel_actions));
-}
-
 //+------------------------------------------------------------------+
 //| Dashboard Interaction Handler                                   |
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam) {
-    if(id==CHARTEVENT_OBJECT_CLICK && StringFind(sparam,WP_TAB_OBJECT_PREFIX)==0) {
-        int tab=(int)StringToInteger(StringSubstr(sparam,StringLen(WP_TAB_OBJECT_PREFIX)));
-        ObjectSetInteger(0,sparam,OBJPROP_STATE,false);
-        if(tab>=0 && tab<ArraySize(WP_TAB_LABELS)) {
-            string action="TAB"+IntegerToString(tab);
-            ProcessDashboardAction(action);
-            Print("[NEXA][PANEL] Navigation button clicked: ",WP_TAB_LABELS[tab]);
-            WP_UpdateTabButtons();
-            web_panel_next_refresh=GetTickCount()+WP_CLICK_REFRESH_DELAY_MS;
-        }
-        return;
-    }
-    if(id==CHARTEVENT_OBJECT_DRAG && sparam==WP_BITMAP_OBJECT) {
-        web_panel_x=(int)MathMax(0,ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_XDISTANCE));
-        web_panel_y=(int)MathMax(0,ObjectGetInteger(0,WP_BITMAP_OBJECT,OBJPROP_YDISTANCE));
-        WP_SetPosition();
-        WP_UpdateTabButtons();
-        ObjectSetInteger(0,WP_BITMAP_OBJECT,OBJPROP_SELECTED,false);
-        Print("[NEXA][PANEL] Moved to x=",web_panel_x," y=",web_panel_y);
-        return;
-    }
-    if(id==CHARTEVENT_MOUSE_MOVE) {
-        WP_OnMouseMove(lparam,dparam,sparam);
-        return;
-    }
     if(id==CHARTEVENT_CHART_CHANGE) {
-        WP_SetPosition();
+        RenderDashboard();
         return;
     }
-    WP_OnChartEvent(id,lparam,dparam,sparam);
     if(!InpShowDashboard) return;
-    if(id==CHARTEVENT_OBJECT_DRAG && (sparam==DashName("DragHandle") || sparam==DashName("Canvas"))){
-        dashboard_x=(int)ObjectGetInteger(0,sparam,OBJPROP_XDISTANCE)-DS(1); 
-        dashboard_y=(int)ObjectGetInteger(0,sparam,OBJPROP_YDISTANCE)-DS(1);
+    if(id==CHARTEVENT_OBJECT_ENDEDIT && StringFind(sparam,dashboard_prefix)==0) {
+        string field=StringSubstr(sparam,StringLen(dashboard_prefix));
+        if(field=="LotEdit") CommitDashboardEdit("Lot");
+        else if(field=="RiskEdit") CommitDashboardEdit("Risk");
+        else if(field=="MartMultEdit") CommitDashboardEdit("MartMult");
+        else if(field=="MartStepsEdit") CommitDashboardEdit("MartSteps");
+        return;
+    }
+    if(id==CHARTEVENT_OBJECT_DRAG && sparam==DashName("DragHandle")){
+        dashboard_x=(int)ObjectGetInteger(0,sparam,OBJPROP_XDISTANCE)-DSX(1);
+        dashboard_y=(int)ObjectGetInteger(0,sparam,OBJPROP_YDISTANCE)-DSY(1);
         Print("[NEXA][DASHBOARD] Moved to x=",dashboard_x," y=",dashboard_y); 
         RenderDashboard(); 
         return;
@@ -3150,24 +2794,9 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
 
     if(id!=CHARTEVENT_OBJECT_CLICK) return;
 
-    string key = "";
-
-    // 1. Hit-Test via Click Coordinates if clicked on Canvas or Frame
-    if(sparam==DashName("Canvas") || sparam==DashName("Frame") || StringFind(sparam,dashboard_prefix)==0) {
-        double scale = DashboardScaleFactor() / DASHBOARD_WIDTH_FACTOR;
-        if(scale <= 0.01) scale = 1.0;
-        int rx = (int)MathRound(((double)lparam - (double)dashboard_x) / scale);
-        int ry = (int)MathRound(((double)dparam - (double)dashboard_y) / scale);
-
-        key = HitTestDashboard(dashboard_tab, rx, ry);
-    }
-
-    // 2. Direct named button click fallback
-    if(key == "" && StringFind(sparam, dashboard_prefix) == 0) {
-        if(StringFind(sparam, dashboard_prefix+"RC_") == 0 || StringFind(sparam, dashboard_prefix+"SBAR_") == 0) return;
-        key = StringSubstr(sparam, StringLen(dashboard_prefix));
-    }
-
+    if(StringFind(sparam,dashboard_prefix)!=0) return;
+    string key=StringSubstr(sparam,StringLen(dashboard_prefix));
+    if(StringFind(key,"SBAR_")==0 || key=="Canvas" || key=="Surface") return;
     if(key != "") {
         ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
         ProcessDashboardAction(key);

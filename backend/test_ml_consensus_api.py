@@ -381,7 +381,7 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(result["execution_atr"], 0.25)
         self.assertTrue(result["entry_triggered"])
 
-    def test_six_timeframe_range_uses_learned_poi_without_demand_zone(self):
+    def test_six_timeframe_range_blocks_scalp_until_h1_has_direction(self):
         candle = self.payload["h1_candles"]
         payload = {
             **self.payload,
@@ -427,21 +427,20 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
         self.assertEqual(result["trend_direction"], "RANGE")
-        self.assertEqual(result["recommended_mode"], "SCALP")
-        self.assertEqual(result["signal"], "BUY")
-        self.assertEqual(result["confirmation_status"], "RANGE_SCALP_CONFIRMED")
-        self.assertEqual(result["entry_zone_source"], "validated_ml_scalp_execution")
-        self.assertEqual(result["entry_zone_low"], 99.5)
-        self.assertEqual(result["entry_zone_high"], 100.5)
-        self.assertTrue(result["entry_triggered"])
-        self.assertEqual(result["risk_stop_atr"], 0.7)
+        self.assertEqual(result["recommended_mode"], "WAIT")
+        self.assertEqual(result["signal"], "WAIT")
+        self.assertEqual(result["signal_reason"], "WAIT_FOR_H1_DIRECTION")
+        self.assertEqual(result["confirmation_status"], "WAIT_FOR_H1_DIRECTION")
+        self.assertEqual(result["entry_zone_source"], "unavailable")
+        self.assertEqual(result["entry_zone_low"], 0.0)
+        self.assertEqual(result["entry_zone_high"], 0.0)
+        self.assertFalse(result["entry_triggered"])
         self.assertEqual(result["timeframes"]["h4"]["demand_low"], 97.0)
         self.assertEqual(result["timeframes"]["h4"]["supply_high"], 103.0)
+        self.assertEqual(result["poi_direction"], "NONE")
         self.assertEqual(result["m1_poi_direction"], "BUY")
-        self.assertEqual(result["m1_poi_low"], 99.5)
-        self.assertEqual(result["m5_poi_high"], 100.5)
 
-    def test_six_timeframe_range_waits_without_validated_ml_poi(self):
+    def test_six_timeframe_range_waits_for_h1_direction_even_without_poi(self):
         candle = self.payload["h1_candles"]
         payload = {
             **self.payload,
@@ -478,8 +477,8 @@ class MlConsensusApiTests(unittest.TestCase):
         result = response.json()
         self.assertEqual(result["recommended_mode"], "WAIT")
         self.assertEqual(result["signal"], "WAIT")
-        self.assertEqual(result["signal_reason"], "WAIT_FOR_VALIDATED_ML_POI")
-        self.assertEqual(result["confirmation_status"], "WAIT_FOR_ML_POI")
+        self.assertEqual(result["signal_reason"], "WAIT_FOR_H1_DIRECTION")
+        self.assertEqual(result["confirmation_status"], "WAIT_FOR_H1_DIRECTION")
         self.assertEqual(result["poi_direction"], "NONE")
         self.assertEqual(result["entry_zone_low"], 0.0)
         self.assertEqual(result["entry_status"], "NO_ENTRY_ZONE")
@@ -516,6 +515,10 @@ class MlConsensusApiTests(unittest.TestCase):
         self.assertFalse(result["h4_aligned"])
         self.assertEqual(result["recommended_mode"], "SCALP")
         self.assertEqual(result["signal"], "SELL")
+        self.assertEqual(result["poi_direction"], "SELL")
+        self.assertEqual(result["entry_zone_source"], "validated_ml_scalp_execution")
+        self.assertEqual(result["entry_zone_low"], 99.5)
+        self.assertEqual(result["entry_zone_high"], 100.5)
         self.assertEqual(result["risk_target_atr"], 1.0)
 
     def test_six_timeframe_route_blocks_entries_against_h1_even_when_h4_agrees(self):
